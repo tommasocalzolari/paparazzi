@@ -1,18 +1,10 @@
 /*
  * custom_detector.cpp
  *
- * Paparazzi/OpenCV module
+ * Paparazzi color obstacle detector without OpenCV.
  *
- * Detects obstacles from color masks and publishes:
+ * Detects orange and green obstacles from YUV422 frames and publishes:
  *   CUSTOM_DETECTION(uint8_t left, uint8_t middle, uint8_t right)
- *
- * Message rule:
- *   obstacle = 1 if region risk_score >= 2
- *   obstacle = 0 otherwise
- *
- * Structure:
- *   - image callback processes frame and stores latest result
- *   - periodic function publishes stored result through ABI
  */
 
 extern "C" {
@@ -22,21 +14,14 @@ extern "C" {
 #include "std.h"
 }
 
-#include <opencv2/opencv.hpp>
-#include <opencv2/core.hpp>
-#include <opencv2/imgproc.hpp>
-
 #include <pthread.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <vector>
+#include <chrono>
 #include <string>
 #include <algorithm>
-
-using namespace cv;
-using namespace std;
 
 #define PRINT(string, ...) fprintf(stderr, "[custom_detector->%s()] " string, __FUNCTION__, ##__VA_ARGS__)
 
@@ -50,10 +35,6 @@ using namespace std;
 #define VERBOSE_PRINT(...)
 #endif
 
-// ----------------------------------------------------------------------------
-// Configuration
-// ----------------------------------------------------------------------------
-
 #ifndef CUSTOM_DETECT_COLOR_OBJECT_ID
 #define CUSTOM_DETECT_COLOR_OBJECT_ID ABI_BROADCAST
 #endif
@@ -62,36 +43,34 @@ using namespace std;
 #define CUSTOM_DETECT_COLOR_OBJECT_FPS 0
 #endif
 
+enum detector_rotation_t {
+  DETECTOR_ROTATE_NONE = 0,
+  DETECTOR_ROTATE_90_CLOCKWISE = 1,
+  DETECTOR_ROTATE_180 = 2,
+  DETECTOR_ROTATE_90_COUNTERCLOCKWISE = 3
+};
+
 #ifndef CUSTOM_DETECT_COLOR_OBJECT_ROTATION
-#define CUSTOM_DETECT_COLOR_OBJECT_ROTATION cv::ROTATE_90_COUNTERCLOCKWISE
+#define CUSTOM_DETECT_COLOR_OBJECT_ROTATION DETECTOR_ROTATE_90_COUNTERCLOCKWISE
 #endif
 
 static pthread_mutex_t detector_mutex;
 
-// HSV thresholds for orange
-static const Scalar ORANGE_LOWER(5, 80, 120);
-static const Scalar ORANGE_UPPER(25, 255, 255);
+// HSV-like thresholds (OpenCV scale: H in [0,179], S,V in [0,255])
+static const int ORANGE_H_MIN = 5;
+static const int ORANGE_H_MAX = 25;
+static const int ORANGE_S_MIN = 80;
+static const int ORANGE_V_MIN = 120;
 
-// Orange geometry filter
-static const float ORANGE_MIN_ASPECT_RATIO = 1.0f;   // height / width
-static const int ORANGE_MIN_HEIGHT = 50;
-
-// HSV thresholds for green
-static const Scalar GREEN_LOWER(25, 40, 40);
-static const Scalar GREEN_UPPER(90, 255, 255);
-
-// Minimum contour area
-static const int MIN_AREA_ORANGE = 300;
-static const int MIN_AREA_GREEN = 120;
+static const int GREEN_H_MIN = 25;
+static const int GREEN_H_MAX = 90;
+static const int GREEN_S_MIN = 40;
+static const int GREEN_V_MIN = 40;
 
 // Occupancy thresholds
 static const float ORANGE_OCC_THRESHOLD = 0.20f;
 static const float GREEN_OCC_THRESHOLD = 0.10f;
 static const float WINDOW_LOW_THRESHOLD = 0.10f;
-
-// ----------------------------------------------------------------------------
-// Global published result
-// ----------------------------------------------------------------------------
 
 struct custom_detection_result_t {
   uint8_t left;
@@ -102,454 +81,227 @@ struct custom_detection_result_t {
 
 static struct custom_detection_result_t global_result;
 
-// ----------------------------------------------------------------------------
-// Helper structs
-// ----------------------------------------------------------------------------
-
-struct WindowCandidate {
-  int x;
-  int y;
-  int w;
-  int h;
-  double area;
-};
-
 struct RegionMetrics {
   float orange_occ;
   float green_occ;
   float window_occ;
-
   bool orange_blocked;
   bool green_blocked;
   bool window_blocked;
   bool blocked;
-
   int risk_score;
-  Rect bbox;
 };
 
-// ----------------------------------------------------------------------------
-// Utility functions
-// ----------------------------------------------------------------------------
-
-static Mat preprocess_mask(const Mat &mask_in, int kernel_size)
+static inline uint8_t clamp_u8(int v)
 {
-  Mat mask = mask_in.clone();
-  Mat kernel = Mat::ones(kernel_size, kernel_size, CV_8U);
-
-  morphologyEx(mask, mask, MORPH_OPEN, kernel);
-  morphologyEx(mask, mask, MORPH_CLOSE, kernel);
-
-  return mask;
+  return (uint8_t)std::max(0, std::min(255, v));
 }
 
-// These functions expect HSV input
-static Mat build_orange_mask_from_hsv(const Mat &image_hsv)
+static void get_processed_dimensions(int src_w, int src_h, int *proc_w, int *proc_h)
 {
-  Mat mask;
-  inRange(image_hsv, ORANGE_LOWER, ORANGE_UPPER, mask);
-  return preprocess_mask(mask, 5);
+  if (CUSTOM_DETECT_COLOR_OBJECT_ROTATION == DETECTOR_ROTATE_90_CLOCKWISE ||
+      CUSTOM_DETECT_COLOR_OBJECT_ROTATION == DETECTOR_ROTATE_90_COUNTERCLOCKWISE) {
+    *proc_w = src_h;
+    *proc_h = src_w;
+  } else {
+    *proc_w = src_w;
+    *proc_h = src_h;
+  }
 }
 
-static Mat build_green_mask_from_hsv(const Mat &image_hsv)
+static void map_processed_to_source(int xr, int yr, int src_w, int src_h, int *xs, int *ys)
 {
-  Mat mask;
-  inRange(image_hsv, GREEN_LOWER, GREEN_UPPER, mask);
-  return preprocess_mask(mask, 3);
+  switch (CUSTOM_DETECT_COLOR_OBJECT_ROTATION) {
+    case DETECTOR_ROTATE_90_COUNTERCLOCKWISE:
+      *xs = src_w - 1 - yr;
+      *ys = xr;
+      break;
+    case DETECTOR_ROTATE_90_CLOCKWISE:
+      *xs = yr;
+      *ys = src_h - 1 - xr;
+      break;
+    case DETECTOR_ROTATE_180:
+      *xs = src_w - 1 - xr;
+      *ys = src_h - 1 - yr;
+      break;
+    case DETECTOR_ROTATE_NONE:
+    default:
+      *xs = xr;
+      *ys = yr;
+      break;
+  }
 }
 
-// ----------------------------------------------------------------------------
-// Geometry-validated orange mask
-// ----------------------------------------------------------------------------
-
-static Mat build_valid_orange_mask(const Mat &orange_mask)
+static bool sample_yuv_uyvy(const struct image_t *img, int x, int y, uint8_t *yy, uint8_t *uu, uint8_t *vv)
 {
-  Mat valid_mask = Mat::zeros(orange_mask.size(), CV_8UC1);
-
-  vector<vector<Point> > contours;
-  findContours(orange_mask.clone(), contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
-
-  for (size_t i = 0; i < contours.size(); i++) {
-    double area = contourArea(contours[i]);
-    if (area < MIN_AREA_ORANGE) {
-      continue;
-    }
-
-    Rect r = boundingRect(contours[i]);
-
-    if (r.height < ORANGE_MIN_HEIGHT) {
-      continue;
-    }
-
-    float aspect_ratio = (float)r.height / (float)max(r.width, 1);
-    if (aspect_ratio < ORANGE_MIN_ASPECT_RATIO) {
-      continue;
-    }
-
-    drawContours(valid_mask, contours, (int)i, Scalar(255), FILLED);
+  if (x < 0 || y < 0 || x >= img->w || y >= img->h) {
+    return false;
   }
 
-  return valid_mask;
+  int x_even = x & ~1;
+  size_t idx = ((size_t)y * (size_t)img->w + (size_t)x_even) * 2u;
+
+  uint8_t u = img->buf[idx + 0u];
+  uint8_t y0 = img->buf[idx + 1u];
+  uint8_t v = img->buf[idx + 2u];
+  uint8_t y1 = img->buf[idx + 3u];
+
+  *uu = u;
+  *vv = v;
+  *yy = (x == x_even) ? y0 : y1;
+  return true;
 }
 
-// ----------------------------------------------------------------------------
-// Split green into floor and obstacles
-// ----------------------------------------------------------------------------
-
-static void split_green_floor_and_obstacles(const Mat &green_mask,
-                                            Mat &floor_mask,
-                                            Mat &obstacle_mask)
+static void yuv_to_hsv(uint8_t y, uint8_t u, uint8_t v, int *h, int *s, int *val)
 {
-  int h = green_mask.rows;
-  int w = green_mask.cols;
+  int c = (int)y - 16;
+  int d = (int)u - 128;
+  int e = (int)v - 128;
 
-  Mat labels, stats, centroids;
-  int num_labels = connectedComponentsWithStats(green_mask, labels, stats, centroids, 8);
+  int r = (298 * c + 409 * e + 128) >> 8;
+  int g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+  int b = (298 * c + 516 * d + 128) >> 8;
 
-  floor_mask = Mat::zeros(green_mask.size(), CV_8UC1);
-  obstacle_mask = Mat::zeros(green_mask.size(), CV_8UC1);
+  int rr = clamp_u8(r);
+  int gg = clamp_u8(g);
+  int bb = clamp_u8(b);
 
-  for (int label = 1; label < num_labels; label++) {
-    int y    = stats.at<int>(label, CC_STAT_TOP);
-    int ww   = stats.at<int>(label, CC_STAT_WIDTH);
-    int hh   = stats.at<int>(label, CC_STAT_HEIGHT);
-    int area = stats.at<int>(label, CC_STAT_AREA);
+  int cmax = std::max(rr, std::max(gg, bb));
+  int cmin = std::min(rr, std::min(gg, bb));
+  int delta = cmax - cmin;
 
-    if (area < 50) {
-      continue;
-    }
-
-    Mat component = (labels == label);
-    component.convertTo(component, CV_8UC1, 255);
-
-    bool touches_bottom = false;
-    for (int col = 0; col < w; col++) {
-      if (component.at<uint8_t>(h - 1, col) > 0) {
-        touches_bottom = true;
-        break;
+  int hue = 0;
+  if (delta != 0) {
+    if (cmax == rr) {
+      hue = 60 * (gg - bb) / delta;
+      if (hue < 0) {
+        hue += 360;
       }
-    }
-
-    bool wide_and_low = ((y + hh) > (int)(0.75f * h)) && (ww > (int)(0.25f * w));
-
-    if (touches_bottom || wide_and_low) {
-      bitwise_or(floor_mask, component, floor_mask);
+    } else if (cmax == gg) {
+      hue = 60 * (bb - rr) / delta + 120;
     } else {
-      bitwise_or(obstacle_mask, component, obstacle_mask);
+      hue = 60 * (rr - gg) / delta + 240;
     }
   }
+
+  int sat = (cmax == 0) ? 0 : (255 * delta) / cmax;
+
+  *h = hue / 2;
+  *s = sat;
+  *val = cmax;
 }
 
-// ----------------------------------------------------------------------------
-// Geometry-validated green obstacle mask
-// ----------------------------------------------------------------------------
-
-static Mat build_valid_green_obstacle_mask(const Mat &green_obstacle_mask)
+static bool is_orange(int h, int s, int v)
 {
-  Mat valid_mask = Mat::zeros(green_obstacle_mask.size(), CV_8UC1);
-
-  vector<vector<Point> > contours;
-  findContours(green_obstacle_mask.clone(), contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
-
-  for (size_t i = 0; i < contours.size(); i++) {
-    double area = contourArea(contours[i]);
-    if (area < MIN_AREA_GREEN) {
-      continue;
-    }
-
-    drawContours(valid_mask, contours, (int)i, Scalar(255), FILLED);
-  }
-
-  return valid_mask;
+  return (h >= ORANGE_H_MIN && h <= ORANGE_H_MAX && s >= ORANGE_S_MIN && v >= ORANGE_V_MIN);
 }
 
-// ----------------------------------------------------------------------------
-// Window candidates from edges
-// ----------------------------------------------------------------------------
-
-static vector<WindowCandidate> get_window_candidates_from_edges(const Mat &image_bgr, Mat &edges_out)
+static bool is_green(int h, int s, int v)
 {
-  Mat gray, blur_img, edges;
-  cvtColor(image_bgr, gray, COLOR_BGR2GRAY);
-  GaussianBlur(gray, blur_img, Size(5, 5), 0);
-
-  Canny(blur_img, edges, 50, 150);
-
-  Mat kernel = Mat::ones(3, 3, CV_8U);
-  dilate(edges, edges, kernel, Point(-1, -1), 1);
-  morphologyEx(edges, edges, MORPH_CLOSE, kernel);
-
-  vector<vector<Point> > contours;
-  findContours(edges.clone(), contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
-
-  vector<WindowCandidate> candidates;
-  int h_img = image_bgr.rows;
-
-  for (size_t i = 0; i < contours.size(); i++) {
-    double area = contourArea(contours[i]);
-    if (area < 200 || area > 3000) {
-      continue;
-    }
-
-    double peri = arcLength(contours[i], true);
-    vector<Point> approx;
-    approxPolyDP(contours[i], approx, 0.02 * peri, true);
-
-    if (approx.size() < 4 || approx.size() > 8) {
-      continue;
-    }
-
-    Rect r = boundingRect(approx);
-
-    if (r.width < 15 || r.height < 15) {
-      continue;
-    }
-
-    float aspect = (float)r.width / (float)max(r.height, 1);
-    if (!(aspect > 0.6f && aspect < 1.6f)) {
-      continue;
-    }
-
-    if (r.y > (int)(0.5f * h_img)) {
-      continue;
-    }
-
-    Mat roi = gray(r);
-    if (roi.empty()) {
-      continue;
-    }
-
-    Scalar mean_val = mean(roi);
-    if (mean_val[0] > 170.0) {
-      continue;
-    }
-
-    WindowCandidate c;
-    c.x = r.x;
-    c.y = r.y;
-    c.w = r.width;
-    c.h = r.height;
-    c.area = area;
-    candidates.push_back(c);
-  }
-
-  edges_out = edges.clone();
-  return candidates;
+  return (h >= GREEN_H_MIN && h <= GREEN_H_MAX && s >= GREEN_S_MIN && v >= GREEN_V_MIN);
 }
 
-// ----------------------------------------------------------------------------
-// Door mask from best window candidate
-// ----------------------------------------------------------------------------
-
-static Mat build_door_mask_from_window(const Size &frame_size,
-                                       const vector<WindowCandidate> &window_candidates)
+static void compute_column_metrics_from_yuv(const struct image_t *img,
+                                            RegionMetrics *left_m,
+                                            RegionMetrics *center_m,
+                                            RegionMetrics *right_m)
 {
-  Mat door_mask = Mat::zeros(frame_size, CV_8UC1);
+  int proc_w = 0;
+  int proc_h = 0;
+  get_processed_dimensions(img->w, img->h, &proc_w, &proc_h);
 
-  if (window_candidates.empty()) {
-    return door_mask;
-  }
+  int col_w = proc_w / 3;
+  int bottom_y1 = (3 * proc_h) / 4;
 
-  WindowCandidate best = window_candidates[0];
-  for (size_t i = 1; i < window_candidates.size(); i++) {
-    if (window_candidates[i].area > best.area) {
-      best = window_candidates[i];
-    }
-  }
+  int orange_count[3] = {0, 0, 0};
+  int green_count[3] = {0, 0, 0};
+  int total_count[3] = {0, 0, 0};
+  int dark_upper_count[3] = {0, 0, 0};
+  int upper_total_count[3] = {0, 0, 0};
 
-  int h = frame_size.height;
-  int w = frame_size.width;
+  for (int yr = 0; yr < proc_h; yr++) {
+    for (int xr = 0; xr < proc_w; xr++) {
+      int col = (xr < col_w) ? 0 : ((xr < (2 * col_w)) ? 1 : 2);
 
-  int door_x = max(0, best.x - (int)(0.5f * best.w));
-  int door_y = max(0, best.y - (int)(0.1f * best.h));
-  int door_w = min(w - door_x, (int)(1.5f * best.w));
-  int door_h = min(h - door_y, (int)(3.0f * best.h));
+      int xs = 0;
+      int ys = 0;
+      map_processed_to_source(xr, yr, img->w, img->h, &xs, &ys);
 
-  rectangle(door_mask,
-            Point(door_x, door_y),
-            Point(door_x + door_w, door_y + door_h),
-            Scalar(255),
-            FILLED);
-
-  return door_mask;
-}
-
-// ----------------------------------------------------------------------------
-// Drawing helpers
-// ----------------------------------------------------------------------------
-
-static void draw_bboxes(Mat &frame,
-                        const Mat &mask,
-                        const Scalar &color,
-                        const string &label,
-                        int min_area,
-                        bool require_tall = false,
-                        float min_aspect_ratio = 1.0f,
-                        int min_height = 0)
-{
-  vector<vector<Point> > contours;
-  findContours(mask.clone(), contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
-
-  for (size_t i = 0; i < contours.size(); i++) {
-    double area = contourArea(contours[i]);
-    if (area < min_area) {
-      continue;
-    }
-
-    Rect r = boundingRect(contours[i]);
-
-    if (require_tall) {
-      if (r.height < min_height) {
+      uint8_t yy = 0;
+      uint8_t uu = 0;
+      uint8_t vv = 0;
+      if (!sample_yuv_uyvy(img, xs, ys, &yy, &uu, &vv)) {
         continue;
       }
-      float aspect_ratio = (float)r.height / (float)max(r.width, 1);
-      if (aspect_ratio < min_aspect_ratio) {
-        continue;
+
+      int h = 0;
+      int s = 0;
+      int val = 0;
+      yuv_to_hsv(yy, uu, vv, &h, &s, &val);
+
+      if (yr >= bottom_y1) {
+        total_count[col]++;
+        if (is_orange(h, s, val)) {
+          orange_count[col]++;
+        }
+
+        // Down-weight floor-like green near the image bottom.
+        if (yr < (bottom_y1 + ((proc_h - bottom_y1) * 3) / 4) && is_green(h, s, val)) {
+          green_count[col]++;
+        }
+      }
+
+      if (yr < (proc_h / 2)) {
+        upper_total_count[col]++;
+        if (yy < 70) {
+          dark_upper_count[col]++;
+        }
       }
     }
-
-    rectangle(frame, r, color, 2);
-    putText(frame, label,
-            Point(r.x, max(r.y - 8, 20)),
-            FONT_HERSHEY_SIMPLEX, 0.6, color, 2);
-  }
-}
-
-static void draw_door_from_window(Mat &frame, const vector<WindowCandidate> &window_candidates)
-{
-  if (window_candidates.empty()) {
-    return;
   }
 
-  WindowCandidate best = window_candidates[0];
-  for (size_t i = 1; i < window_candidates.size(); i++) {
-    if (window_candidates[i].area > best.area) {
-      best = window_candidates[i];
-    }
-  }
+  RegionMetrics metrics[3];
+  for (int i = 0; i < 3; i++) {
+    int total = std::max(1, total_count[i]);
+    int upper_total = std::max(1, upper_total_count[i]);
 
-  int h_img = frame.rows;
-  int w_img = frame.cols;
-
-  rectangle(frame,
-            Point(best.x, best.y),
-            Point(best.x + best.w, best.y + best.h),
-            Scalar(255, 0, 255), 2);
-
-  putText(frame, "Window",
-          Point(best.x, max(best.y - 8, 20)),
-          FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 0, 255), 2);
-
-  int door_x = max(0, best.x - (int)(0.5f * best.w));
-  int door_y = max(0, best.y - (int)(0.1f * best.h));
-  int door_w = min(w_img - door_x, (int)(1.5f * best.w));
-  int door_h = min(h_img - door_y, (int)(3.0f * best.h));
-
-  rectangle(frame,
-            Point(door_x, door_y),
-            Point(door_x + door_w, door_y + door_h),
-            Scalar(255, 140, 0), 2);
-
-  putText(frame, "Door",
-          Point(door_x, max(door_y - 8, 20)),
-          FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 140, 0), 2);
-}
-
-static void draw_navigation_columns(Mat &frame,
-                                    const RegionMetrics &left_m,
-                                    const RegionMetrics &center_m,
-                                    const RegionMetrics &right_m,
-                                    const string &decision)
-{
-  auto draw_one = [&](const string &name, const RegionMetrics &m) {
-    Scalar color = m.blocked ? Scalar(0, 0, 255) : Scalar(0, 255, 0);
-    string text = m.blocked ? (name + ": NO") : (name + ": FREE");
-
-    rectangle(frame, m.bbox, color, 3);
-
-    putText(frame, text,
-            Point(m.bbox.x + 10, m.bbox.y + 35),
-            FONT_HERSHEY_SIMPLEX, 0.8, color, 2);
-
-    char risk_text[32];
-    snprintf(risk_text, sizeof(risk_text), "risk=%d", m.risk_score);
-
-    putText(frame, risk_text,
-            Point(m.bbox.x + 10, m.bbox.y + 65),
-            FONT_HERSHEY_SIMPLEX, 0.6, color, 2);
-  };
-
-  draw_one("L", left_m);
-  draw_one("C", center_m);
-  draw_one("R", right_m);
-
-  putText(frame,
-          "Decision: " + decision,
-          Point(20, 40),
-          FONT_HERSHEY_SIMPLEX, 1.0, Scalar(255, 255, 255), 2);
-}
-
-// ----------------------------------------------------------------------------
-// Risk computation
-// ----------------------------------------------------------------------------
-
-static void compute_column_metrics(const Mat &orange_mask,
-                                   const Mat &door_mask,
-                                   const Mat &green_obstacle_mask,
-                                   RegionMetrics &left_m,
-                                   RegionMetrics &center_m,
-                                   RegionMetrics &right_m)
-{
-  int h = orange_mask.rows;
-  int w = orange_mask.cols;
-
-  int col_w = w / 3;
-  int row_h = h / 4;
-
-  int bottom_y1 = 3 * row_h;
-  int bottom_y2 = h;
-
-  Rect left_rect(0, bottom_y1, col_w, bottom_y2 - bottom_y1);
-  Rect center_rect(col_w, bottom_y1, col_w, bottom_y2 - bottom_y1);
-  Rect right_rect(2 * col_w, bottom_y1, w - 2 * col_w, bottom_y2 - bottom_y1);
-
-  auto eval_region = [&](const Rect &r, RegionMetrics &m) {
-    int total_pixels = max(1, r.width * r.height);
-
-    float orange_occ = (float)countNonZero(orange_mask(r)) / (float)total_pixels;
-    float green_occ  = (float)countNonZero(green_obstacle_mask(r)) / (float)total_pixels;
-    float window_occ = (float)countNonZero(door_mask(r)) / (float)total_pixels;
+    float orange_occ = (float)orange_count[i] / (float)total;
+    float green_occ = (float)green_count[i] / (float)total;
+    float window_occ = (float)dark_upper_count[i] / (float)upper_total;
 
     bool orange_blocked = orange_occ >= ORANGE_OCC_THRESHOLD;
-    bool green_blocked  = green_occ  >= GREEN_OCC_THRESHOLD;
+    bool green_blocked = green_occ >= GREEN_OCC_THRESHOLD;
     bool window_blocked = window_occ <= WINDOW_LOW_THRESHOLD;
 
-    bool blocked = orange_blocked || green_blocked;
-
     int risk_score = 0;
-    if (orange_blocked) risk_score += 2;
-    if (green_blocked)  risk_score += 2;
-    if (window_blocked) risk_score += 1;
+    if (orange_blocked) {
+      risk_score += 2;
+    }
+    if (green_blocked) {
+      risk_score += 2;
+    }
+    if (window_blocked) {
+      risk_score += 1;
+    }
 
-    m.orange_occ = orange_occ;
-    m.green_occ = green_occ;
-    m.window_occ = window_occ;
-    m.orange_blocked = orange_blocked;
-    m.green_blocked = green_blocked;
-    m.window_blocked = window_blocked;
-    m.blocked = blocked;
-    m.risk_score = risk_score;
-    m.bbox = r;
-  };
+    metrics[i].orange_occ = orange_occ;
+    metrics[i].green_occ = green_occ;
+    metrics[i].window_occ = window_occ;
+    metrics[i].orange_blocked = orange_blocked;
+    metrics[i].green_blocked = green_blocked;
+    metrics[i].window_blocked = window_blocked;
+    metrics[i].blocked = orange_blocked || green_blocked;
+    metrics[i].risk_score = risk_score;
+  }
 
-  eval_region(left_rect, left_m);
-  eval_region(center_rect, center_m);
-  eval_region(right_rect, right_m);
+  *left_m = metrics[0];
+  *center_m = metrics[1];
+  *right_m = metrics[2];
 }
 
-static string decide_direction(const RegionMetrics &left_m,
-                               const RegionMetrics &center_m,
-                               const RegionMetrics &right_m)
+static std::string decide_direction(const RegionMetrics &left_m,
+                                    const RegionMetrics &center_m,
+                                    const RegionMetrics &right_m)
 {
   int left_risk = left_m.risk_score;
   int center_risk = center_m.risk_score;
@@ -561,14 +313,16 @@ static string decide_direction(const RegionMetrics &left_m,
 
   if (left_risk == 0 && center_risk == 0 && right_risk == 0) {
     return "CENTER";
-  } else if (center_risk < 2) {
+  }
+  if (center_risk < 2) {
     return "CENTER";
-  } else if (!left_m.blocked && right_m.blocked) {
+  }
+  if (!left_m.blocked && right_m.blocked) {
     return "LEFT";
-  } else if (!right_m.blocked && left_m.blocked) {
+  }
+  if (!right_m.blocked && left_m.blocked) {
     return "RIGHT";
   }
-
   return (left_risk <= right_risk) ? "LEFT" : "RIGHT";
 }
 
@@ -579,70 +333,37 @@ static void risk_to_binary_obstacles(const RegionMetrics &left_m,
                                      uint8_t *center_obs,
                                      uint8_t *right_obs)
 {
-  *left_obs   = (left_m.risk_score   >= 2) ? 1 : 0;
+  *left_obs = (left_m.risk_score >= 2) ? 1 : 0;
   *center_obs = (center_m.risk_score >= 2) ? 1 : 0;
-  *right_obs  = (right_m.risk_score  >= 2) ? 1 : 0;
+  *right_obs = (right_m.risk_score >= 2) ? 1 : 0;
 }
-
-// ----------------------------------------------------------------------------
-// Main image callback processing
-// ----------------------------------------------------------------------------
 
 static struct image_t *object_detector(struct image_t *img, uint8_t camera_id);
 static struct image_t *object_detector(struct image_t *img, uint8_t camera_id __attribute__((unused)))
 {
-  if (img == NULL || img->buf == NULL) {
+  auto start_time = std::chrono::high_resolution_clock::now();
+
+  if (img == NULL || img->buf == NULL || img->w <= 0 || img->h <= 0) {
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+    VERBOSE_PRINT("object_detector execution time: %.3f ms\n", elapsed_us / 1000.0);
     return img;
   }
 
-  // Raw Paparazzi camera image is YUV422 packed
-  Mat src_yuv(img->h, img->w, CV_8UC2, img->buf);
-
-  // Convert YUV422 -> BGR
-  // If colors look wrong, try COLOR_YUV2BGR_YUY2 instead
-  Mat frame_bgr;
-  cvtColor(src_yuv, frame_bgr, COLOR_YUV2BGR_UYVY);
-
-  // Rotate
-  rotate(frame_bgr, frame_bgr, CUSTOM_DETECT_COLOR_OBJECT_ROTATION);
-
-  // Convert BGR -> HSV once
-  Mat frame_hsv;
-  cvtColor(frame_bgr, frame_hsv, COLOR_BGR2HSV);
-
-  // Raw masks from HSV
-  Mat orange_mask_raw = build_orange_mask_from_hsv(frame_hsv);
-  Mat green_mask = build_green_mask_from_hsv(frame_hsv);
-
-  // Window/door from BGR
-  Mat edge_mask;
-  vector<WindowCandidate> window_candidates = get_window_candidates_from_edges(frame_bgr, edge_mask);
-  Mat door_mask = build_door_mask_from_window(frame_bgr.size(), window_candidates);
-
-  // Split green into floor and obstacle
-  Mat green_floor_mask, green_obstacle_mask_raw;
-  split_green_floor_and_obstacles(green_mask, green_floor_mask, green_obstacle_mask_raw);
-
-  // Geometry-validated masks
-  Mat orange_mask_valid = build_valid_orange_mask(orange_mask_raw);
-  Mat green_obstacle_mask_valid = build_valid_green_obstacle_mask(green_obstacle_mask_raw);
-
-  // Risk computation
   RegionMetrics left_m, center_m, right_m;
-  compute_column_metrics(orange_mask_valid, door_mask, green_obstacle_mask_valid,
-                         left_m, center_m, right_m);
+  compute_column_metrics_from_yuv(img, &left_m, &center_m, &right_m);
 
-  string decision = decide_direction(left_m, center_m, right_m);
+  std::string decision = decide_direction(left_m, center_m, right_m);
 
-  uint8_t left_obs, center_obs, right_obs;
-  risk_to_binary_obstacles(left_m, center_m, right_m,
-                           &left_obs, &center_obs, &right_obs);
+  uint8_t left_obs = 0;
+  uint8_t center_obs = 0;
+  uint8_t right_obs = 0;
+  risk_to_binary_obstacles(left_m, center_m, right_m, &left_obs, &center_obs, &right_obs);
 
   VERBOSE_PRINT("Decision: %s\n", decision.c_str());
   VERBOSE_PRINT("Binary obstacle message -> Left: %d Center: %d Right: %d\n",
                 left_obs, center_obs, right_obs);
 
-  // Store result for periodic ABI publication
   pthread_mutex_lock(&detector_mutex);
   global_result.left = left_obs;
   global_result.middle = center_obs;
@@ -650,43 +371,12 @@ static struct image_t *object_detector(struct image_t *img, uint8_t camera_id __
   global_result.updated = true;
   pthread_mutex_unlock(&detector_mutex);
 
-  // Optional debug drawing on frame_bgr
-  draw_bboxes(frame_bgr,
-              green_obstacle_mask_valid,
-              Scalar(0, 255, 0),
-              "Green obstacle",
-              MIN_AREA_GREEN);
-
-  draw_bboxes(frame_bgr,
-              orange_mask_valid,
-              Scalar(0, 140, 255),
-              "Orange object",
-              MIN_AREA_ORANGE,
-              true,
-              ORANGE_MIN_ASPECT_RATIO,
-              ORANGE_MIN_HEIGHT);
-
-  draw_door_from_window(frame_bgr, window_candidates);
-  draw_navigation_columns(frame_bgr, left_m, center_m, right_m, decision);
-
-  // Optional debug windows
-  imshow("Detection", frame_bgr);
-  // imshow("HSV", frame_hsv);
-  // imshow("Edges", edge_mask);
-  // imshow("Orange Raw", orange_mask_raw);
-  // imshow("Orange Valid", orange_mask_valid);
-  // imshow("Green Mask", green_mask);
-  // imshow("Green Obstacle Raw", green_obstacle_mask_raw);
-  // imshow("Green Obstacle Valid", green_obstacle_mask_valid);
-  // imshow("Door Mask", door_mask);
-  waitKey(1);
+  auto end_time = std::chrono::high_resolution_clock::now();
+  auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+  VERBOSE_PRINT("object_detector execution time: %.3f ms\n", elapsed_us / 1000.0);
 
   return img;
 }
-
-// ----------------------------------------------------------------------------
-// Paparazzi hooks
-// ----------------------------------------------------------------------------
 
 extern "C" {
 
