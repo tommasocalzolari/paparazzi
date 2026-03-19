@@ -98,7 +98,7 @@
       <define name="COLOR_OBJECT_DETECTOR_FPS" value="0"/>
       <define name="COLOR_OBJECT_DETECTOR_DRAW" value="1"/>
     </module>
-    <module name="custom_avoider">
+    <module name="gate_fusion_nav">
       <define name="CUSTOM_AVOIDER_CUSTOM_DETECTION_ID" value="COLOR_OBJECT_DETECTION_ID"/>
     </module>
     <module name="video_rtp_stream">
