@@ -7,15 +7,10 @@ Expected CSV:
 - One column with image paths
 - One column with labels (0/1 or text like tree/no_tree)
 
-Usage:
-    python train_tree_cnn.py --csv balanced_tree_patch_labels.csv --image-root .
-
-Optional:
-    --image-col patch_path --label-col has_tree
+Configuration is set at the top of the main() function.
 """
 
 import os
-import argparse
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -51,7 +46,7 @@ def find_image_col(df):
             if sample_vals.str.contains(r"\.(jpg|jpeg|png|bmp|tif|tiff)$", regex=True).mean() > 0.3:
                 return col
 
-    raise ValueError("Could not automatically detect image path column. Please pass --image-col.")
+    raise ValueError("Could not automatically detect image path column. Set image_col in main() configuration.")
 
 
 def find_label_col(df, image_col):
@@ -69,7 +64,7 @@ def find_label_col(df, image_col):
         if nunique <= 10:
             return col
 
-    raise ValueError("Could not automatically detect label column. Please pass --label-col.")
+    raise ValueError("Could not automatically detect label column. Set label_col in main() configuration.")
 
 
 def normalize_binary_labels(series):
@@ -237,19 +232,34 @@ def run_epoch(model, loader, criterion, optimizer, device, train=True):
     return metrics, probs_all, labels_all
 
 
-def main(args):
+def main():
+    # Configuration
+    csv_path = "balanced_tree_patch_labels.csv"
+    image_root = ""
+    image_col = "frame_path"
+    label_col = "tree_present"
+    img_size = 128
+    batch_size = 32
+    epochs = 25
+    lr = 1e-3
+    patience = 5
+    num_workers = 2
+    seed = 42
+    use_cpu = False
+    model_out = "tree_cnn_best.pt"
+    
     # Reproducibility
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
     # Load CSV
-    df = pd.read_csv(args.csv)
+    df = pd.read_csv(csv_path)
     if df.empty:
         raise ValueError("CSV is empty.")
 
     # Determine columns
-    image_col = args.image_col if args.image_col else find_image_col(df)
-    label_col = args.label_col if args.label_col else find_label_col(df, image_col)
+    image_col = image_col if image_col else find_image_col(df)
+    label_col = label_col if label_col else find_label_col(df, image_col)
 
     print(f"[INFO] Image column: {image_col}")
     print(f"[INFO] Label column: {label_col}")
@@ -260,10 +270,10 @@ def main(args):
 
     # Split data: train/val/test = 70/15/15 (stratified)
     train_df, temp_df = train_test_split(
-        df, test_size=0.30, random_state=args.seed, stratify=df[label_col]
+        df, test_size=0.30, random_state=seed, stratify=df[label_col]
     )
     val_df, test_df = train_test_split(
-        temp_df, test_size=0.50, random_state=args.seed, stratify=temp_df[label_col]
+        temp_df, test_size=0.50, random_state=seed, stratify=temp_df[label_col]
     )
 
     print(f"[INFO] Train size: {len(train_df)} | Val size: {len(val_df)} | Test size: {len(test_df)}")
@@ -272,7 +282,7 @@ def main(args):
 
     # Transforms
     train_tfms = transforms.Compose([
-        transforms.Resize((args.img_size, args.img_size)),
+        transforms.Resize((img_size, img_size)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomRotation(10),
         transforms.ToTensor(),
@@ -281,27 +291,27 @@ def main(args):
     ])
 
     eval_tfms = transforms.Compose([
-        transforms.Resize((args.img_size, args.img_size)),
+        transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225]),
     ])
 
     # Datasets / loaders
-    train_ds = PatchDataset(train_df, image_col, label_col, args.image_root, train_tfms)
-    val_ds = PatchDataset(val_df, image_col, label_col, args.image_root, eval_tfms)
-    test_ds = PatchDataset(test_df, image_col, label_col, args.image_root, eval_tfms)
+    train_ds = PatchDataset(train_df, image_col, label_col, image_root, train_tfms)
+    val_ds = PatchDataset(val_df, image_col, label_col, image_root, eval_tfms)
+    test_ds = PatchDataset(test_df, image_col, label_col, image_root, eval_tfms)
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     # Model, loss, optimizer
-    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() and not use_cpu else "cpu")
     model = SimpleCNN().to(device)
 
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
 
     best_val_f1 = -1.0
     best_state = None
@@ -310,7 +320,7 @@ def main(args):
     print(f"[INFO] Using device: {device}")
     print("[INFO] Starting training...")
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(1, epochs + 1):
         train_metrics, _, _ = run_epoch(model, train_loader, criterion, optimizer, device, train=True)
         val_metrics, _, _ = run_epoch(model, val_loader, criterion, optimizer, device, train=False)
 
@@ -327,8 +337,8 @@ def main(args):
             patience_counter = 0
         else:
             patience_counter += 1
-            if patience_counter >= args.patience:
-                print(f"[INFO] Early stopping triggered (patience={args.patience}).")
+            if patience_counter >= patience:
+                print(f"[INFO] Early stopping triggered (patience={patience}).")
                 break
 
     # Load best model
@@ -355,39 +365,19 @@ def main(args):
     print(classification_report(test_labels, test_preds, digits=4))
 
     # Save model
-    os.makedirs(os.path.dirname(args.model_out) if os.path.dirname(args.model_out) else ".", exist_ok=True)
+    os.makedirs(os.path.dirname(model_out) if os.path.dirname(model_out) else ".", exist_ok=True)
     torch.save(
         {
             "model_state_dict": model.state_dict(),
             "image_col": image_col,
             "label_col": label_col,
-            "img_size": args.img_size,
+            "img_size": img_size,
             "threshold": 0.5,
         },
-        args.model_out
+        model_out
     )
-    print(f"[INFO] Saved best model to: {args.model_out}")
+    print(f"[INFO] Saved best model to: {model_out}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--csv", type=str, default="balanced_tree_patch_labels.csv",
-                        help="Path to CSV file with image paths and labels.")
-    parser.add_argument("--image-root", type=str, default="",
-                        help="Optional root directory prepended to relative image paths.")
-    parser.add_argument("--image-col", type=str, default=None,
-                        help="Image path column name (optional, auto-detected if omitted).")
-    parser.add_argument("--label-col", type=str, default=None,
-                        help="Label column name (optional, auto-detected if omitted).")
-    parser.add_argument("--img-size", type=int, default=128)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--epochs", type=int, default=25)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available.")
-    parser.add_argument("--model-out", type=str, default="tree_cnn_best.pt")
-    args = parser.parse_args()
-
-    main(args)
+    main()
