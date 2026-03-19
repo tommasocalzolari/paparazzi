@@ -111,6 +111,7 @@ def keep_only_green_pixels(image_bgr):
         iterations=expand_iterations,
     )
     grown_mask = cv2.dilate(expanded_mask, dilate_kernel, iterations=dilate_iterations)
+    grown_mask = green_mask
 
     green_only = cv2.bitwise_and(image_bgr, image_bgr, mask=grown_mask)
     return green_only, grown_mask

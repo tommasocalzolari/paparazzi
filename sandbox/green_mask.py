@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import os
 
+print(cv2.getBuildInformation())
+
 # Specify your folder path
 folder_path = "./datasets/Organised/20260306-handFlying-2"  # Change this to your image folder
 
