@@ -1,0 +1,84 @@
+<!DOCTYPE module SYSTEM "module.dtd">
+
+<module name="gate_fusion_nav" dir="custom_avoider">
+  <doc>
+    <description>
+      Fused navigation module combining:
+      - CUSTOM_DETECTION from the obstacle detector
+      - VISUAL_DETECTION from the gate CNN detector
+
+      Obstacle avoidance is always active.
+      When a gate is detected, the drone aligns to it and moves forward.
+      When the gate is very close, the module commits to a short blind pass-through.
+    </description>
+
+    <define name="GATE_FUSION_CUSTOM_DETECTION_ID"
+            value="ABI_BROADCAST"
+            description="Sender id to subscribe to CUSTOM_DETECTION"/>
+
+    <define name="GATE_FUSION_VISUAL_DETECTION_ID"
+            value="ABI_BROADCAST"
+            description="Sender id to subscribe to VISUAL_DETECTION"/>
+
+    <define name="GATE_FUSION_IMAGE_CENTER_X"
+            value="120"
+            description="Image center x in pixels for the active camera stream"/>
+
+    <define name="GATE_FUSION_MIN_QUALITY"
+            value="250"
+            description="Minimum VISUAL_DETECTION quality required to consider the gate valid"/>
+
+    <define name="GATE_FUSION_BLIND_QUALITY"
+            value="500"
+            description="Quality threshold for triggering blind pass-through"/>
+
+    <define name="GATE_FUSION_BLIND_MIN_WIDTH"
+            value="120"
+            description="Minimum bbox width in pixels to trigger blind pass-through"/>
+
+    <define name="GATE_FUSION_BLIND_MIN_HEIGHT"
+            value="120"
+            description="Minimum bbox height in pixels to trigger blind pass-through"/>
+
+    <define name="GATE_FUSION_BLIND_CYCLES"
+            value="10"
+            description="Number of periodic cycles to keep moving blindly through the gate"/>
+
+    <define name="GATE_FUSION_FORWARD_DIST"
+            value="1.0"
+            description="Goal waypoint forward motion in meters"/>
+
+    <define name="GATE_FUSION_TRAJ_FORWARD_DIST"
+            value="1.5"
+            description="Trajectory waypoint forward motion in meters"/>
+
+    <define name="GATE_FUSION_SEARCH_HEADING_INC_DEG"
+            value="5.0"
+            description="Heading increment during search"/>
+
+    <define name="GATE_FUSION_ALIGN_HEADING_INC_DEG"
+            value="4.0"
+            description="Heading increment while aligning to the gate"/>
+
+    <define name="GATE_FUSION_AVOID_HEADING_INC_DEG"
+            value="6.0"
+            description="Heading increment for side obstacle avoidance bias"/>
+
+    <define name="GATE_FUSION_ALIGN_TOL_PX"
+            value="20"
+            description="Horizontal pixel tolerance for declaring the gate centered"/>
+  </doc>
+
+  <header>
+    <file name="gate_fusion_nav.h"/>
+  </header>
+
+  <init fun="gate_fusion_nav_init()"/>
+  <periodic fun="gate_fusion_nav_periodic()" freq="4"/>
+
+  <makefile target="ap|nps">
+    <file name="gate_fusion_nav.c"/>
+    <flag name="CFLAGS" value="-O3"/>
+    <flag name="CFLAGS" value="-ffast-math"/>
+  </makefile>
+</module>
