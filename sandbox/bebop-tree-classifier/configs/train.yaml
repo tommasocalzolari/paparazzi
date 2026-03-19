@@ -1,0 +1,16 @@
+learning_rate: 0.001
+batch_size: 32
+epochs: 50
+optimizer: Adam
+loss_function: CrossEntropyLoss
+validation_split: 0.2
+shuffle: true
+seed: 42
+input_size: [224, 224]
+num_classes: 10
+data_augmentation:
+  horizontal_flip: true
+  vertical_flip: false
+  rotation_range: 15
+  zoom_range: 0.1
+  brightness_range: [0.8, 1.2]

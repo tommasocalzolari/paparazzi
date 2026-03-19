@@ -1,0 +1,10 @@
+deployment:
+  model_path: "models/trained_model.pth"
+  output_path: "data/processed/predictions.json"
+  environment:
+    drone_type: "Bebop"
+    battery_life: "30 minutes"
+    max_altitude: "150 meters"
+  parameters:
+    confidence_threshold: 0.7
+    max_predictions: 1000
