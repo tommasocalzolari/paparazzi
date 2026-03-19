@@ -50,19 +50,16 @@
       <define name="VIDEO_CAPTURE_FPS" value="10"/>
     </module>
 
-      <module name="custom_detector">
+    <module name="custom_detector_fast">
         <define name="CUSTOM_COLOR_RISK_DETECTOR_CAMERA" value="front_camera"/>
         <define name="CUSTOM_COLOR_RISK_DETECTOR_FPS" value="0"/>
         <define name="CUSTOM_COLOR_RISK_DETECTOR_DEBUG" value="FALSE"/>
         <define name="CUSTOM_DETECT_COLOR_OBJECT_ID" value="ABI_BROADCAST"/>
     </module>
 
-
     <module name="custom_avoider">
       <define name="CUSTOM_AVOIDER_CUSTOM_DETECTION_ID" value="ABI_BROADCAST"/>
     </module>
-
-    
 
     <module name="video_rtp_stream">
       <define name="VIEWVIDEO_CAMERA" value="front_camera"/>

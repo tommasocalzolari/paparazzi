@@ -591,6 +591,10 @@ static void risk_to_binary_obstacles(const RegionMetrics &left_m,
 static struct image_t *object_detector(struct image_t *img, uint8_t camera_id);
 static struct image_t *object_detector(struct image_t *img, uint8_t camera_id __attribute__((unused)))
 {
+  auto start_time = std::chrono::high_resolution_clock::now();
+
+
+
   if (img == NULL || img->buf == NULL) {
     return img;
   }
@@ -651,6 +655,7 @@ static struct image_t *object_detector(struct image_t *img, uint8_t camera_id __
   pthread_mutex_unlock(&detector_mutex);
 
   // Optional debug drawing on frame_bgr
+  /*
   draw_bboxes(frame_bgr,
               green_obstacle_mask_valid,
               Scalar(0, 255, 0),
@@ -665,12 +670,13 @@ static struct image_t *object_detector(struct image_t *img, uint8_t camera_id __
               true,
               ORANGE_MIN_ASPECT_RATIO,
               ORANGE_MIN_HEIGHT);
+  */
 
-  draw_door_from_window(frame_bgr, window_candidates);
-  draw_navigation_columns(frame_bgr, left_m, center_m, right_m, decision);
+  //draw_door_from_window(frame_bgr, window_candidates);
+  //draw_navigation_columns(frame_bgr, left_m, center_m, right_m, decision);
 
   // Optional debug windows
-  imshow("Detection", frame_bgr);
+  // imshow("Detection", frame_bgr);
   // imshow("HSV", frame_hsv);
   // imshow("Edges", edge_mask);
   // imshow("Orange Raw", orange_mask_raw);
@@ -679,7 +685,19 @@ static struct image_t *object_detector(struct image_t *img, uint8_t camera_id __
   // imshow("Green Obstacle Raw", green_obstacle_mask_raw);
   // imshow("Green Obstacle Valid", green_obstacle_mask_valid);
   // imshow("Door Mask", door_mask);
-  waitKey(1);
+  // waitKey(1);
+  /*
+  Mat frame_bgr_unrotated;
+  rotate(frame_bgr, frame_bgr_unrotated, cv::ROTATE_90_CLOCKWISE);
+
+  // Write annotated frame back into buffer so RTP stream shows the detection overlay
+  Mat out_uyvy;
+  cvtColor(frame_bgr_unrotated, out_uyvy, COLOR_BGR2YUV_UYVY);
+  memcpy(img->buf, out_uyvy.data, (size_t)img->w * img->h * 2);
+*/
+  auto end_time = std::chrono::high_resolution_clock::now();
+  auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+  VERBOSE_PRINT("object_detector execution time: %.3f ms\\n", elapsed_us / 1000.0);
 
   return img;
 }

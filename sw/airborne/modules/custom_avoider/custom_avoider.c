@@ -114,7 +114,7 @@ void navigation_controller_periodic(void)
   float moveDistance = 1.5f; // default move distance [m]
   float headingIncrement = 5.f; // default heading increment [deg]
  
-  VERBOSE_PRINT("Object detections - Left: %d, Middle: %d, Right: %d\n", objectLeft, objectMiddle, objectRight);
+  //VERBOSE_PRINT("Object detections - Left: %d, Middle: %d, Right: %d\n", objectLeft, objectMiddle, objectRight);
 
   switch (navigation_state){
     case SAFE:
@@ -122,16 +122,16 @@ void navigation_controller_periodic(void)
       moveWaypointForward(WP_TRAJECTORY, 1.5f * moveDistance);
       if (!InsideObstacleZone(WaypointX(WP_TRAJECTORY),WaypointY(WP_TRAJECTORY))){
         navigation_state = OUT_OF_BOUNDS;
-        VERBOSE_PRINT("Sate: OUT_OF_BOUNDS\n");
+        //VERBOSE_PRINT("Sate: OUT_OF_BOUNDS\n");
       } else if(objectMiddle == 1){
         navigation_state = OBSTACLE_MIDDLE;
-        VERBOSE_PRINT("State: OBSTACLE_MIDDLE\n");
+        //VERBOSE_PRINT("State: OBSTACLE_MIDDLE\n");
       } else if (objectLeft == 1 && objectRight == 0){
         navigation_state = OBSTACLE_LEFT;
-        VERBOSE_PRINT("State: OBSTACLE_LEFT\n");
+        //VERBOSE_PRINT("State: OBSTACLE_LEFT\n");
       } else if (objectRight == 1 && objectLeft == 0){
         navigation_state = OBSTACLE_RIGHT;
-        VERBOSE_PRINT("State: OBSTACLE_RIGHT\n");
+        //VERBOSE_PRINT("State: OBSTACLE_RIGHT\n");
       } else {
             moveWaypointForward(WP_GOAL, moveDistance);
       }
@@ -146,7 +146,7 @@ void navigation_controller_periodic(void)
 
       if(objectLeft == 0){
         navigation_state = SAFE;
-        VERBOSE_PRINT("State: SAFE\n");
+        //VERBOSE_PRINT("State: SAFE\n");
       }
  
       break;
@@ -160,7 +160,7 @@ void navigation_controller_periodic(void)
 
       if(objectRight == 0){
         navigation_state = SAFE;
-        VERBOSE_PRINT("State: SAFE\n");
+        //VERBOSE_PRINT("State: SAFE\n");
       }
     
       break;
@@ -172,7 +172,7 @@ void navigation_controller_periodic(void)
 
       chooseRandomIncrementAvoidance();
       navigation_state = SEARCH_FOR_SAFE_HEADING;
-      VERBOSE_PRINT("State: SEARCH_FOR_SAFE_HEADING\n");
+      //VERBOSE_PRINT("State: SEARCH_FOR_SAFE_HEADING\n");
 
       break;
 
@@ -182,7 +182,7 @@ void navigation_controller_periodic(void)
       // make sure we have a couple of good readings before declaring the way safe
       if (objectLeft == 0 && objectMiddle == 0 && objectRight == 0){
         navigation_state = SAFE;
-        VERBOSE_PRINT("State: SAFE\n");
+        //VERBOSE_PRINT("State: SAFE\n");
       }
       break;
     case OUT_OF_BOUNDS:
@@ -195,7 +195,7 @@ void navigation_controller_periodic(void)
 
         // ensure direction is safe before continuing
         navigation_state = SEARCH_FOR_SAFE_HEADING;
-        VERBOSE_PRINT("State: SEARCH_FOR_SAFE_HEADING\n");
+        //VERBOSE_PRINT("State: SEARCH_FOR_SAFE_HEADING\n");
       }
       break;
     default:

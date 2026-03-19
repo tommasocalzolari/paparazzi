@@ -1,6 +1,6 @@
 <!DOCTYPE module SYSTEM "module.dtd">
 
-<module name="custom_detector" dir="computer_vision">
+<module name="merda" dir="computer_vision">
   <doc>
     <description>
       Pure C color risk detector for YUV422 images.
@@ -79,7 +79,7 @@
     <define name="CCRD_GREEN_MIN_SEED_GREEN_RATIO_NUM" value="8" description="Green minimum seed raw ratio numerator"/>
     <define name="CCRD_GREEN_MIN_SEED_GREEN_RATIO_DEN" value="100" description="Green minimum seed raw ratio denominator"/>
 
-    <define name="CCRD_ORANGE_BOTTOM_ROWS_THRESHOLD_NUM" value="15" description="Orange risk threshold numerator on bottom row"/>
+    <define name="CCRD_ORANGE_BOTTOM_ROWS_THRESHOLD_NUM" value="10" description="Orange risk threshold numerator on bottom row"/>
     <define name="CCRD_ORANGE_BOTTOM_ROWS_THRESHOLD_DEN" value="100" description="Orange risk threshold denominator on bottom row"/>
     <define name="CCRD_GREEN_MIDDLE_ROWS_THRESHOLD_NUM" value="10" description="Green risk threshold numerator on middle rows"/>
     <define name="CCRD_GREEN_MIDDLE_ROWS_THRESHOLD_DEN" value="100" description="Green risk threshold denominator on middle rows"/>
@@ -90,15 +90,13 @@
   </dep>
 
   <header>
-   <file name="custom_detector_fast_rotated.h"/> 
-   <!-- <file name="custom_detector_fast_timer.h"/> -->
+    <file name="custom_detector_fast.h"/>
   </header>
 
   <init fun="custom_color_risk_detector_init()"/>
   <periodic fun="custom_color_risk_detector_periodic()" freq="10"/>
 
   <makefile target="ap|nps">
-   <file name="custom_detector_fast_rotated.c"/> 
-   <!--  <file name="custom_detector_fast_timer.c"/> -->
+    <file name="custom_detector_fast.c"/>
   </makefile>
 </module>
