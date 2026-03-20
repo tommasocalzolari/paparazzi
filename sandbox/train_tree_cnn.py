@@ -17,8 +17,9 @@ from PIL import Image
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
-    roc_auc_score, confusion_matrix, classification_report
+    roc_auc_score, roc_curve, confusion_matrix, classification_report
 )
+import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
@@ -172,19 +173,20 @@ class SimpleCNN(nn.Module):
             nn.Linear(256 * 8 * 8, 256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.4),
-            nn.Linear(256, 1)  # single logit for binary classification
+            nn.Linear(256, 1)
         )
 
     def forward(self, x):
         x = self.features(x)
         x = self.classifier(x)
-        return x.squeeze(1)
+        # Return confidence directly in [0, 1].
+        return torch.sigmoid(x).squeeze(1)
 
 
 # ---------------------------
 # Train / Eval
 # ---------------------------
-def run_epoch(model, loader, criterion, optimizer, device, train=True):
+def run_epoch(model, loader, criterion, optimizer, device, train=True, class_weights=None):
     if train:
         model.train()
     else:
@@ -198,8 +200,13 @@ def run_epoch(model, loader, criterion, optimizer, device, train=True):
             imgs = imgs.to(device)
             labels = labels.to(device)
 
-            logits = model(imgs)
-            loss = criterion(logits, labels)
+            probs = model(imgs)
+            base_loss = criterion(probs, labels)
+            if class_weights is not None:
+                sample_weights = torch.where(labels > 0.5, class_weights["pos"], class_weights["neg"])
+                loss = (base_loss * sample_weights).mean()
+            else:
+                loss = base_loss.mean()
 
             if train:
                 optimizer.zero_grad()
@@ -208,8 +215,8 @@ def run_epoch(model, loader, criterion, optimizer, device, train=True):
 
             losses.append(loss.item())
 
-            probs = torch.sigmoid(logits).detach().cpu().numpy()
-            probs_all.extend(probs.tolist())
+            probs_np = probs.detach().cpu().numpy()
+            probs_all.extend(probs_np.tolist())
             labels_all.extend(labels.detach().cpu().numpy().tolist())
 
     probs_all = np.array(probs_all)
@@ -240,13 +247,15 @@ def main():
     label_col = "tree_present"
     img_size = 128
     batch_size = 32
-    epochs = 25
+    epochs = 100
     lr = 1e-3
-    patience = 5
+    patience = 10
     num_workers = 2
     seed = 42
     use_cpu = False
     model_out = "tree_cnn_best.pt"
+    train_val_plot_out = "train_val_metrics.png"
+    roc_plot_out = "test_roc_curve.png"
     
     # Reproducibility
     torch.manual_seed(seed)
@@ -310,25 +319,55 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() and not use_cpu else "cpu")
     model = SimpleCNN().to(device)
 
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.BCELoss(reduction="none")
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+
+    train_class_counts = train_df[label_col].value_counts().to_dict()
+    neg_count = float(train_class_counts.get(0, 0))
+    pos_count = float(train_class_counts.get(1, 0))
+    if neg_count == 0 or pos_count == 0:
+        raise ValueError("Both classes must be present in training data for class-weighted loss.")
+
+    total = neg_count + pos_count
+    neg_weight = total / (2.0 * neg_count)
+    pos_weight = total / (2.0 * pos_count)
+    class_weights = {
+        "neg": torch.tensor(neg_weight, dtype=torch.float32, device=device),
+        "pos": torch.tensor(pos_weight, dtype=torch.float32, device=device),
+    }
+    print(f"[INFO] Class-weighted loss enabled: neg_weight={neg_weight:.4f}, pos_weight={pos_weight:.4f}")
 
     best_val_f1 = -1.0
     best_state = None
     patience_counter = 0
+    history = {
+        "train_loss": [],
+        "train_acc": [],
+        "val_loss": [],
+        "val_acc": [],
+    }
 
     print(f"[INFO] Using device: {device}")
     print("[INFO] Starting training...")
 
     for epoch in range(1, epochs + 1):
-        train_metrics, _, _ = run_epoch(model, train_loader, criterion, optimizer, device, train=True)
-        val_metrics, _, _ = run_epoch(model, val_loader, criterion, optimizer, device, train=False)
+        train_metrics, _, _ = run_epoch(
+            model, train_loader, criterion, optimizer, device, train=True, class_weights=class_weights
+        )
+        val_metrics, _, _ = run_epoch(
+            model, val_loader, criterion, optimizer, device, train=False, class_weights=None
+        )
 
         print(
             f"Epoch {epoch:03d} | "
             f"Train Loss {train_metrics['loss']:.4f} Acc {train_metrics['acc']:.4f} F1 {train_metrics['f1']:.4f} | "
             f"Val Loss {val_metrics['loss']:.4f} Acc {val_metrics['acc']:.4f} F1 {val_metrics['f1']:.4f} AUC {val_metrics['roc_auc']:.4f}"
         )
+
+        history["train_loss"].append(train_metrics["loss"])
+        history["train_acc"].append(train_metrics["acc"])
+        history["val_loss"].append(val_metrics["loss"])
+        history["val_acc"].append(val_metrics["acc"])
 
         # Early stopping on validation F1
         if val_metrics["f1"] > best_val_f1:
@@ -346,7 +385,9 @@ def main():
         model.load_state_dict(best_state)
 
     # Final test evaluation
-    test_metrics, test_probs, test_labels = run_epoch(model, test_loader, criterion, optimizer=None, device=device, train=False)
+    test_metrics, test_probs, test_labels = run_epoch(
+        model, test_loader, criterion, optimizer=None, device=device, train=False, class_weights=None
+    )
     test_preds = (test_probs >= 0.5).astype(int)
 
     print("\n=== TEST METRICS ===")
@@ -363,6 +404,51 @@ def main():
 
     print("\nClassification Report:")
     print(classification_report(test_labels, test_preds, digits=4))
+
+    # Plot train/val curves
+    epochs_axis = np.arange(1, len(history["train_loss"]) + 1)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    axes[0].plot(epochs_axis, history["train_loss"], label="Train Loss", linewidth=2)
+    axes[0].plot(epochs_axis, history["val_loss"], label="Val Loss", linewidth=2)
+    axes[0].set_title("Loss vs Epoch")
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("Loss")
+    axes[0].grid(alpha=0.3)
+    axes[0].legend()
+
+    axes[1].plot(epochs_axis, history["train_acc"], label="Train Acc", linewidth=2)
+    axes[1].plot(epochs_axis, history["val_acc"], label="Val Acc", linewidth=2)
+    axes[1].set_title("Accuracy vs Epoch")
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("Accuracy")
+    axes[1].set_ylim(0.0, 1.0)
+    axes[1].grid(alpha=0.3)
+    axes[1].legend()
+
+    fig.tight_layout()
+    fig.savefig(train_val_plot_out, dpi=150)
+    plt.close(fig)
+    print(f"[INFO] Saved train/val metrics plot to: {train_val_plot_out}")
+
+    # Plot ROC curve for test set
+    fpr, tpr, _ = roc_curve(test_labels, test_probs)
+    roc_auc = roc_auc_score(test_labels, test_probs)
+
+    plt.figure(figsize=(6, 6))
+    plt.plot(fpr, tpr, linewidth=2, label=f"ROC (AUC = {roc_auc:.4f})")
+    plt.plot([0, 1], [0, 1], linestyle="--", linewidth=1, label="Chance")
+    plt.xlim(0.0, 1.0)
+    plt.ylim(0.0, 1.0)
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("Test ROC Curve")
+    plt.grid(alpha=0.3)
+    plt.legend(loc="lower right")
+    plt.tight_layout()
+    plt.savefig(roc_plot_out, dpi=150)
+    plt.close()
+    print(f"[INFO] Saved ROC curve plot to: {roc_plot_out}")
 
     # Save model
     os.makedirs(os.path.dirname(model_out) if os.path.dirname(model_out) else ".", exist_ok=True)
