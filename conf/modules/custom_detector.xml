@@ -81,7 +81,7 @@
 
     <define name="CCRD_ORANGE_BOTTOM_ROWS_THRESHOLD_NUM" value="15" description="Orange risk threshold numerator on bottom row"/>
     <define name="CCRD_ORANGE_BOTTOM_ROWS_THRESHOLD_DEN" value="100" description="Orange risk threshold denominator on bottom row"/>
-    <define name="CCRD_GREEN_MIDDLE_ROWS_THRESHOLD_NUM" value="10" description="Green risk threshold numerator on middle rows"/>
+    <define name="CCRD_GREEN_MIDDLE_ROWS_THRESHOLD_NUM" value="15" description="Green risk threshold numerator on middle rows"/>
     <define name="CCRD_GREEN_MIDDLE_ROWS_THRESHOLD_DEN" value="100" description="Green risk threshold denominator on middle rows"/>
   </doc>
 

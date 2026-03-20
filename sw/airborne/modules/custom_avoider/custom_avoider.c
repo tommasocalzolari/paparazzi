@@ -60,6 +60,13 @@ uint8_t objectLeft = 0;
 uint8_t objectMiddle = 0;
 uint8_t objectRight = 0;
 
+uint8_t objectLeftAccum = 0;
+uint8_t objectMiddleAccum = 0;
+uint8_t objectRightAccum = 0;
+
+uint8_t confidenceThreshold = 1;
+
+
 float heading_increment = 1.f;          // heading angle increment [deg]
 float maxDistance = 2.25;               // max waypoint displacement [m]
 
@@ -111,10 +118,19 @@ void navigation_controller_periodic(void)
 
   // bound obstacle_free_confidence
 
-  float moveDistance = 1.5f; // default move distance [m]
-  float headingIncrement = 5.f; // default heading increment [deg]
+  float moveDistance = 0.2f; // default move distance [m]
+  float headingIncrement = 1.0f; // default heading increment [deg]
  
-  //VERBOSE_PRINT("Object detections - Left: %d, Middle: %d, Right: %d\n", objectLeft, objectMiddle, objectRight);
+  VERBOSE_PRINT("Object detections - Left: %d, Middle: %d, Right: %d\n", objectLeft, objectMiddle, objectRight);
+
+  if (objectLeft == 1) {objectLeftAccum ++;}else{objectLeftAccum --;}
+  if (objectMiddle == 1) {objectMiddleAccum ++;}else{objectMiddleAccum --;}
+  if (objectRight == 1) {objectRightAccum ++;}else{objectRightAccum --;}
+
+  if(objectLeftAccum < 0) objectLeftAccum = 0;
+  if(objectMiddleAccum < 0) objectMiddleAccum = 0;
+  if(objectRightAccum < 0) objectRightAccum = 0;
+
 
   switch (navigation_state){
     case SAFE:
@@ -123,13 +139,13 @@ void navigation_controller_periodic(void)
       if (!InsideObstacleZone(WaypointX(WP_TRAJECTORY),WaypointY(WP_TRAJECTORY))){
         navigation_state = OUT_OF_BOUNDS;
         //VERBOSE_PRINT("Sate: OUT_OF_BOUNDS\n");
-      } else if(objectMiddle == 1){
+      } else if(objectMiddleAccum >= confidenceThreshold){
         navigation_state = OBSTACLE_MIDDLE;
         //VERBOSE_PRINT("State: OBSTACLE_MIDDLE\n");
-      } else if (objectLeft == 1 && objectRight == 0){
+      } else if (objectLeftAccum >= confidenceThreshold && objectRightAccum < confidenceThreshold){
         navigation_state = OBSTACLE_LEFT;
         //VERBOSE_PRINT("State: OBSTACLE_LEFT\n");
-      } else if (objectRight == 1 && objectLeft == 0){
+      } else if (objectRightAccum >= confidenceThreshold && objectLeftAccum < confidenceThreshold){
         navigation_state = OBSTACLE_RIGHT;
         //VERBOSE_PRINT("State: OBSTACLE_RIGHT\n");
       } else {
@@ -144,7 +160,7 @@ void navigation_controller_periodic(void)
 
       increase_nav_heading(headingIncrement);
 
-      if(objectLeft == 0){
+      if(objectLeftAccum < confidenceThreshold){
         navigation_state = SAFE;
         //VERBOSE_PRINT("State: SAFE\n");
       }
@@ -158,7 +174,7 @@ void navigation_controller_periodic(void)
 
       increase_nav_heading(-headingIncrement);
 
-      if(objectRight == 0){
+      if(objectRightAccum < confidenceThreshold){
         navigation_state = SAFE;
         //VERBOSE_PRINT("State: SAFE\n");
       }
