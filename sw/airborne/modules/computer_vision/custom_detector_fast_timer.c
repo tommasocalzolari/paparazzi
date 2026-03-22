@@ -11,6 +11,11 @@
  *  - The Bebop front camera stream is rotated by 90 degrees.
  *  - We DO NOT rotate the image buffer physically.
  *  - We process the image in a logical coordinate frame using coordinate remapping.
+ *
+ * Added:
+ *  - logging to file on drone
+ *  - timing of major pipeline blocks
+ *  - print every 20 frames
  */
 
 #include "modules/computer_vision/custom_detector_fast_timer.h"
@@ -22,16 +27,12 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <time.h>
+#include <stdint.h>
 
 #ifndef CUSTOM_COLOR_RISK_DETECTOR_VERBOSE
 #define CUSTOM_COLOR_RISK_DETECTOR_VERBOSE 1
-#endif
-
-#define PRINT(string,...) fprintf(stderr, "[custom_color_risk_detector->%s()] " string, __FUNCTION__, ##__VA_ARGS__)
-#if CUSTOM_COLOR_RISK_DETECTOR_VERBOSE
-#define VERBOSE_PRINT PRINT
-#else
-#define VERBOSE_PRINT(...)
 #endif
 
 #ifndef CUSTOM_COLOR_RISK_DETECTOR_FPS
@@ -252,6 +253,8 @@
 #define CCRD_MAX_DIM 640
 #endif
 
+#define CCRD_LOG_EVERY_N_FRAMES 20U
+
 struct orange_band_t {
   uint16_t x1, x2, y1, y2;
   uint16_t hits;
@@ -296,10 +299,51 @@ static uint8_t green_supported[CCRD_MAX_PIXELS];
 static uint8_t orange_valid[CCRD_MAX_PIXELS];
 static uint8_t green_valid[CCRD_MAX_PIXELS];
 static uint8_t visited[CCRD_MAX_PIXELS];
+static uint8_t y_logical[CCRD_MAX_PIXELS];
 
 static uint16_t row_counts[CCRD_MAX_DIM];
 static uint16_t col_counts[CCRD_MAX_DIM];
 static uint32_t stack_buf[CCRD_MAX_PIXELS];
+
+static FILE *ccrd_log_file = NULL;
+static uint32_t ccrd_frame_counter = 0U;
+
+/* --------------------------------
+ * File logging helpers
+ * -------------------------------- */
+
+static void ccrd_open_log_file(void)
+{
+  if (ccrd_log_file == NULL) {
+    ccrd_log_file = fopen("/data/video/custom_detector_log.txt", "a");
+
+    if (ccrd_log_file == NULL) {
+      ccrd_log_file = fopen("/tmp/custom_detector_log.txt", "a");
+    }
+  }
+}
+
+static void ccrd_log(const char *fmt, ...)
+{
+  ccrd_open_log_file();
+  if (ccrd_log_file == NULL) {
+    return;
+  }
+
+  va_list args;
+  va_start(args, fmt);
+  vfprintf(ccrd_log_file, fmt, args);
+  va_end(args);
+
+  fflush(ccrd_log_file);
+}
+
+#define PRINT(string,...) ccrd_log("[custom_color_risk_detector->%s()] " string, __FUNCTION__, ##__VA_ARGS__)
+#if CUSTOM_COLOR_RISK_DETECTOR_VERBOSE
+#define VERBOSE_PRINT PRINT
+#else
+#define VERBOSE_PRINT(...)
+#endif
 
 /* Helpers */
 
@@ -437,84 +481,192 @@ static void draw_grid_debug(struct image_t *img)
 
 static void build_masks(const struct image_t *img)
 {
-  const uint16_t w = ccrd_w(img);
-  const uint16_t h = ccrd_h(img);
+  const uint16_t lw = ccrd_w(img);   /* logical width used by the rest of the detector */
+  const uint16_t lh = ccrd_h(img);   /* logical height used by the rest of the detector */
+  const uint16_t sw = img->w;        /* source/native width in memory */
+  const uint16_t sh = img->h;        /* source/native height in memory */
 
-  memset(orange_mask, 0, (size_t)w * h);
-  memset(green_mask, 0, (size_t)w * h);
-  memset(edge_mask, 0, (size_t)w * h);
-  memset(orange_valid, 0, (size_t)w * h);
-  memset(green_valid, 0, (size_t)w * h);
+  memset(orange_mask, 0, (size_t)lw * lh);
+  memset(green_mask, 0, (size_t)lw * lh);
+  memset(edge_mask, 0, (size_t)lw * lh);
+  memset(orange_valid, 0, (size_t)lw * lh);
+  memset(green_valid, 0, (size_t)lw * lh);
+  memset(y_logical, 0, (size_t)lw * lh);
 
-  for (uint16_t y = 0; y < h; y++) {
+  /* ---------------------------------------------------------
+   * PASS 1:
+   * Read the image in native YUV422 memory order.
+   * For each source pixel, compute its logical coordinates once,
+   * then write:
+   *   - logical Y image
+   *   - logical orange mask
+   *   - logical green mask
+   *
+   * This avoids calling yuv422_get_pixel_rot() for every pixel.
+   * --------------------------------------------------------- */
+  for (uint16_t sy = 0; sy < sh; sy++) {
+    uint8_t *row = &img->buf[(uint32_t)sy * 2U * (uint32_t)sw];
 
-    if (w == 0U) {
-      continue;
+    for (uint16_t sx_pair = 0; sx_pair + 1U < sw; sx_pair += 2U) {
+      /* YUV422 pair layout:
+       * even pixel : U Y0 V Y1
+       * odd pixel  : shares same U and V
+       */
+      uint8_t u  = row[2U * sx_pair + 0U];
+      uint8_t y0 = row[2U * sx_pair + 1U];
+      uint8_t v  = row[2U * sx_pair + 2U];
+      uint8_t y1 = row[2U * sx_pair + 3U];
+
+      /* ---------- pixel 0 ---------- */
+      {
+        uint16_t lx, ly;
+#if CCRD_ROTATE_MODE == 0
+        lx = sx_pair;
+        ly = sy;
+#elif CCRD_ROTATE_MODE == 1
+        /* inverse of:
+         * sx = ly
+         * sy = img->h - 1 - lx
+         */
+        lx = (uint16_t)(img->h - 1U - sy);
+        ly = sx_pair;
+#elif CCRD_ROTATE_MODE == 2
+        /* inverse of:
+         * sx = img->w - 1 - ly
+         * sy = lx
+         */
+        lx = sy;
+        ly = (uint16_t)(img->w - 1U - sx_pair);
+#else
+        lx = sx_pair;
+        ly = sy;
+#endif
+
+        if (lx < lw && ly < lh) {
+          uint32_t idx = idx_of(lw, lx, ly);
+          int16_t vu = (int16_t)v - (int16_t)u;
+
+          y_logical[idx] = y0;
+
+          if (y0 >= CCRD_ORANGE_Y_MIN && y0 <= CCRD_ORANGE_Y_MAX &&
+              u  >= CCRD_ORANGE_U_MIN && u  <= CCRD_ORANGE_U_MAX &&
+              v  >= CCRD_ORANGE_V_MIN && v  <= CCRD_ORANGE_V_MAX &&
+              vu >= CCRD_ORANGE_VU_MIN) {
+            orange_mask[idx] = 1U;
+          }
+
+          if (y0 >= CCRD_GREEN_Y_MIN && y0 <= CCRD_GREEN_Y_MAX &&
+              u  >= CCRD_GREEN_U_MIN && u  <= CCRD_GREEN_U_MAX &&
+              v  >= CCRD_GREEN_V_MIN && v  <= CCRD_GREEN_V_MAX &&
+              vu >= CCRD_GREEN_VU_MIN) {
+            green_mask[idx] = 1U;
+          }
+        }
+      }
+
+      /* ---------- pixel 1 ---------- */
+      {
+        uint16_t sx = (uint16_t)(sx_pair + 1U);
+        uint16_t lx, ly;
+#if CCRD_ROTATE_MODE == 0
+        lx = sx;
+        ly = sy;
+#elif CCRD_ROTATE_MODE == 1
+        lx = (uint16_t)(img->h - 1U - sy);
+        ly = sx;
+#elif CCRD_ROTATE_MODE == 2
+        lx = sy;
+        ly = (uint16_t)(img->w - 1U - sx);
+#else
+        lx = sx;
+        ly = sy;
+#endif
+
+        if (lx < lw && ly < lh) {
+          uint32_t idx = idx_of(lw, lx, ly);
+          int16_t vu = (int16_t)v - (int16_t)u;
+
+          y_logical[idx] = y1;
+
+          if (y1 >= CCRD_ORANGE_Y_MIN && y1 <= CCRD_ORANGE_Y_MAX &&
+              u  >= CCRD_ORANGE_U_MIN && u  <= CCRD_ORANGE_U_MAX &&
+              v  >= CCRD_ORANGE_V_MIN && v  <= CCRD_ORANGE_V_MAX &&
+              vu >= CCRD_ORANGE_VU_MIN) {
+            orange_mask[idx] = 1U;
+          }
+
+          if (y1 >= CCRD_GREEN_Y_MIN && y1 <= CCRD_GREEN_Y_MAX &&
+              u  >= CCRD_GREEN_U_MIN && u  <= CCRD_GREEN_U_MAX &&
+              v  >= CCRD_GREEN_V_MIN && v  <= CCRD_GREEN_V_MAX &&
+              vu >= CCRD_GREEN_VU_MIN) {
+            green_mask[idx] = 1U;
+          }
+        }
+      }
     }
 
-    uint8_t y_prev = 0U, y_cur = 0U, y_next = 0U;
-    uint8_t u_cur = 0U, v_cur = 0U;
-    uint8_t u_tmp = 0U, v_tmp = 0U;
+    /* Handle odd image width if present */
+    if ((sw & 1U) != 0U) {
+      uint16_t sx = (uint16_t)(sw - 1U);
+      uint8_t yv, u, v;
+      yuv422_get_pixel(img, sx, sy, &yv, &u, &v);
 
-    yuv422_get_pixel_rot(img, 0U, y, &y_cur, &u_cur, &v_cur);
+      uint16_t lx, ly;
+#if CCRD_ROTATE_MODE == 0
+      lx = sx;
+      ly = sy;
+#elif CCRD_ROTATE_MODE == 1
+      lx = (uint16_t)(img->h - 1U - sy);
+      ly = sx;
+#elif CCRD_ROTATE_MODE == 2
+      lx = sy;
+      ly = (uint16_t)(img->w - 1U - sx);
+#else
+      lx = sx;
+      ly = sy;
+#endif
 
-    {
-      const uint32_t idx = idx_of(w, 0U, y);
+      if (lx < lw && ly < lh) {
+        uint32_t idx = idx_of(lw, lx, ly);
+        int16_t vu = (int16_t)v - (int16_t)u;
 
-      if (y_cur >= CCRD_ORANGE_Y_MIN && y_cur <= CCRD_ORANGE_Y_MAX &&
-          u_cur >= CCRD_ORANGE_U_MIN && u_cur <= CCRD_ORANGE_U_MAX &&
-          v_cur >= CCRD_ORANGE_V_MIN && v_cur <= CCRD_ORANGE_V_MAX &&
-          ((int16_t)v_cur - (int16_t)u_cur) >= CCRD_ORANGE_VU_MIN) {
-        orange_mask[idx] = 1U;
-      }
+        y_logical[idx] = yv;
 
-      if (y_cur >= CCRD_GREEN_Y_MIN && y_cur <= CCRD_GREEN_Y_MAX &&
-          u_cur >= CCRD_GREEN_U_MIN && u_cur <= CCRD_GREEN_U_MAX &&
-          v_cur >= CCRD_GREEN_V_MIN && v_cur <= CCRD_GREEN_V_MAX &&
-          ((int16_t)v_cur - (int16_t)u_cur) >= CCRD_GREEN_VU_MIN) {
-        green_mask[idx] = 1U;
+        if (yv >= CCRD_ORANGE_Y_MIN && yv <= CCRD_ORANGE_Y_MAX &&
+            u  >= CCRD_ORANGE_U_MIN && u  <= CCRD_ORANGE_U_MAX &&
+            v  >= CCRD_ORANGE_V_MIN && v  <= CCRD_ORANGE_V_MAX &&
+            vu >= CCRD_ORANGE_VU_MIN) {
+          orange_mask[idx] = 1U;
+        }
+
+        if (yv >= CCRD_GREEN_Y_MIN && yv <= CCRD_GREEN_Y_MAX &&
+            u  >= CCRD_GREEN_U_MIN && u  <= CCRD_GREEN_U_MAX &&
+            v  >= CCRD_GREEN_V_MIN && v  <= CCRD_GREEN_V_MAX &&
+            vu >= CCRD_GREEN_VU_MIN) {
+          green_mask[idx] = 1U;
+        }
       }
     }
+  }
 
-    if (w == 1U) {
-      continue;
-    }
-
-    y_prev = y_cur;
-    yuv422_get_pixel_rot(img, 1U, y, &y_cur, &u_cur, &v_cur);
-
-    for (uint16_t x = 1U; x < w; x++) {
-      const uint32_t idx = idx_of(w, x, y);
-
-      if (y_cur >= CCRD_ORANGE_Y_MIN && y_cur <= CCRD_ORANGE_Y_MAX &&
-          u_cur >= CCRD_ORANGE_U_MIN && u_cur <= CCRD_ORANGE_U_MAX &&
-          v_cur >= CCRD_ORANGE_V_MIN && v_cur <= CCRD_ORANGE_V_MAX &&
-          ((int16_t)v_cur - (int16_t)u_cur) >= CCRD_ORANGE_VU_MIN) {
-        orange_mask[idx] = 1U;
-      }
-
-      if (y_cur >= CCRD_GREEN_Y_MIN && y_cur <= CCRD_GREEN_Y_MAX &&
-          u_cur >= CCRD_GREEN_U_MIN && u_cur <= CCRD_GREEN_U_MAX &&
-          v_cur >= CCRD_GREEN_V_MIN && v_cur <= CCRD_GREEN_V_MAX &&
-          ((int16_t)v_cur - (int16_t)u_cur) >= CCRD_GREEN_VU_MIN) {
-        green_mask[idx] = 1U;
-      }
-
-      if (x + 1U < w) {
-        yuv422_get_pixel_rot(img, (uint16_t)(x + 1U), y, &y_next, &u_tmp, &v_tmp);
-
+  /* ---------------------------------------------------------
+   * PASS 2:
+   * Compute logical horizontal gradient from logical Y image.
+   * This preserves the previous edge-mask meaning:
+   * edge at x if |Y(x+1) - Y(x-1)| >= threshold
+   * --------------------------------------------------------- */
+  if (lw >= 3U) {
+    for (uint16_t y = 0; y < lh; y++) {
+      for (uint16_t x = 1U; x + 1U < lw; x++) {
+        uint8_t y_prev = y_logical[idx_of(lw, (uint16_t)(x - 1U), y)];
+        uint8_t y_next = y_logical[idx_of(lw, (uint16_t)(x + 1U), y)];
         int16_t grad = (int16_t)y_next - (int16_t)y_prev;
         if (grad < 0) {
           grad = -grad;
         }
         if (grad >= CCRD_GRAD_THRESHOLD) {
-          edge_mask[idx] = 1U;
+          edge_mask[idx_of(lw, x, y)] = 1U;
         }
-
-        y_prev = y_cur;
-        y_cur = y_next;
-        u_cur = u_tmp;
-        v_cur = v_tmp;
       }
     }
   }
@@ -982,13 +1134,26 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img, uint
     return img;
   }
 
+  clock_t t0, t1, t2, t3, t4, t5, t6;
+  t0 = clock();
+
   memset(&local_result, 0, sizeof(local_result));
 
   build_masks(img);
+  t1 = clock();
+
   uint16_t nbands = scan_orange_vertical_bands(img, bands);
+  t2 = clock();
+
   uint16_t norange = group_orange_bands(img, bands, nbands, orange_objects);
+  t3 = clock();
+
   uint16_t ngreen = detect_green_objects(img, green_objects);
+  t4 = clock();
+
   compute_risk_map(img, &local_result);
+  t5 = clock();
+
   local_result.updated = true;
 
   if (CUSTOM_COLOR_RISK_DETECTOR_DEBUG) {
@@ -1001,12 +1166,38 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img, uint
     }
   }
 
-  VERBOSE_PRINT("orange objects=%u green objects=%u risk=[%u,%u,%u]\n",
-                norange, ngreen, local_result.left, local_result.middle, local_result.right);
+  t6 = clock();
 
   pthread_mutex_lock(&ccrd_mutex);
   memcpy(&g_result, &local_result, sizeof(local_result));
   pthread_mutex_unlock(&ccrd_mutex);
+
+  ccrd_frame_counter++;
+
+  if ((ccrd_frame_counter % CCRD_LOG_EVERY_N_FRAMES) == 0U) {
+    double ms_build_masks  = 1000.0 * (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
+    double ms_scan_orange  = 1000.0 * (double)(t2 - t1) / (double)CLOCKS_PER_SEC;
+    double ms_group_orange = 1000.0 * (double)(t3 - t2) / (double)CLOCKS_PER_SEC;
+    double ms_detect_green = 1000.0 * (double)(t4 - t3) / (double)CLOCKS_PER_SEC;
+    double ms_risk_map     = 1000.0 * (double)(t5 - t4) / (double)CLOCKS_PER_SEC;
+    double ms_debug_draw   = 1000.0 * (double)(t6 - t5) / (double)CLOCKS_PER_SEC;
+    double ms_total        = 1000.0 * (double)(t6 - t0) / (double)CLOCKS_PER_SEC;
+
+    VERBOSE_PRINT("frame=%lu orange_objects=%u green_objects=%u risk=[%u,%u,%u]\n",
+                  (unsigned long)ccrd_frame_counter,
+                  norange, ngreen,
+                  local_result.left, local_result.middle, local_result.right);
+
+    VERBOSE_PRINT("timing_ms frame=%lu masks=%.3f scan_orange=%.3f group_orange=%.3f detect_green=%.3f risk=%.3f debug=%.3f total=%.3f\n",
+                  (unsigned long)ccrd_frame_counter,
+                  ms_build_masks,
+                  ms_scan_orange,
+                  ms_group_orange,
+                  ms_detect_green,
+                  ms_risk_map,
+                  ms_debug_draw,
+                  ms_total);
+  }
 
   return img;
 }
@@ -1015,6 +1206,10 @@ void custom_color_risk_detector_init(void)
 {
   memset(&g_result, 0, sizeof(g_result));
   pthread_mutex_init(&ccrd_mutex, NULL);
+
+  ccrd_open_log_file();
+  ccrd_log("[custom_color_risk_detector->%s()] init\n", __FUNCTION__);
+
   cv_add_to_device(&CUSTOM_COLOR_RISK_DETECTOR_CAMERA,
                    custom_color_risk_detector_func,
                    CUSTOM_COLOR_RISK_DETECTOR_FPS,
