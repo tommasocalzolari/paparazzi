@@ -1,4 +1,4 @@
-#include "lowres_blue.h"
+#include "lowres_blue_functions.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
