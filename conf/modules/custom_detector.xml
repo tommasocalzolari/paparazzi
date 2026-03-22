@@ -90,15 +90,15 @@
   </dep>
 
   <header>
-   <file name="custom_detector_fast_rotated.h"/> 
-   <!-- <file name="custom_detector_fast_timer.h"/> -->
+   <!--<file name="custom_detector_fast_rotated.h"/> --> 
+   <file name="custom_detector_fast_timer.h"/>
   </header>
 
   <init fun="custom_color_risk_detector_init()"/>
   <periodic fun="custom_color_risk_detector_periodic()" freq="10"/>
 
   <makefile target="ap|nps">
-   <file name="custom_detector_fast_rotated.c"/> 
-   <!--  <file name="custom_detector_fast_timer.c"/> -->
+   <!-- <file name="custom_detector_fast_rotated.c"/> --> 
+   <file name="custom_detector_fast_timer.c"/>
   </makefile>
 </module>
