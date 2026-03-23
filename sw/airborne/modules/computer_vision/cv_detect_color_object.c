@@ -34,6 +34,10 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <math.h>
+#include <string.h>
+#include <stdint.h>
+#include <time.h>
+#include <sys/time.h>
 #include "pthread.h"
 
 #define PRINT(string,...) fprintf(stderr, "[object_detector->%s()] " string,__FUNCTION__ , ##__VA_ARGS__)
@@ -44,6 +48,117 @@
 #endif
 
 static pthread_mutex_t mutex;
+
+/* -------------------------------------------------------------------------- */
+/* Timing / profiling configuration                                            */
+/* -------------------------------------------------------------------------- */
+
+#ifndef COLOR_OBJECT_DETECTOR_PROFILE
+#define COLOR_OBJECT_DETECTOR_PROFILE 1
+#endif
+
+#ifndef COLOR_OBJECT_DETECTOR_PROFILE_LOG_PATH
+#define COLOR_OBJECT_DETECTOR_PROFILE_LOG_PATH "/tmp/color_object_detector_timing.log"
+#endif
+
+#ifndef COLOR_OBJECT_DETECTOR_PROFILE_FLUSH_EVERY_LINE
+#define COLOR_OBJECT_DETECTOR_PROFILE_FLUSH_EVERY_LINE 1
+#endif
+
+static pthread_mutex_t profile_mutex;
+static FILE *profile_log_file = NULL;
+
+static inline uint64_t cod_time_now_us(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ((uint64_t)ts.tv_sec * 1000000ULL) + ((uint64_t)ts.tv_nsec / 1000ULL);
+}
+
+static void cod_profile_open_log(void)
+{
+#if COLOR_OBJECT_DETECTOR_PROFILE
+  pthread_mutex_lock(&profile_mutex);
+
+  if (profile_log_file == NULL) {
+    profile_log_file = fopen(COLOR_OBJECT_DETECTOR_PROFILE_LOG_PATH, "a");
+    if (profile_log_file != NULL) {
+      setvbuf(profile_log_file, NULL, _IOLBF, 0); // line buffered
+      fprintf(profile_log_file,
+              "\n===== color_object_detector profiling started =====\n");
+    } else {
+      fprintf(stderr,
+              "[object_detector] Failed to open profile log: %s\n",
+              COLOR_OBJECT_DETECTOR_PROFILE_LOG_PATH);
+    }
+  }
+
+  pthread_mutex_unlock(&profile_mutex);
+#endif
+}
+
+static void cod_profile_log(const char *func_name, uint64_t dt_us,
+                            uint32_t count, int32_t x_c, int32_t y_c)
+{
+#if COLOR_OBJECT_DETECTOR_PROFILE
+  pthread_mutex_lock(&profile_mutex);
+
+  if (profile_log_file != NULL) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+
+    fprintf(profile_log_file,
+            "%ld.%06ld,%s,%llu us,count=%u,xc=%ld,yc=%ld\n",
+            (long)tv.tv_sec,
+            (long)tv.tv_usec,
+            func_name,
+            (unsigned long long)dt_us,
+            count,
+            (long)x_c,
+            (long)y_c);
+
+#if COLOR_OBJECT_DETECTOR_PROFILE_FLUSH_EVERY_LINE
+    fflush(profile_log_file);
+#endif
+  }
+
+  pthread_mutex_unlock(&profile_mutex);
+#else
+  (void)func_name;
+  (void)dt_us;
+  (void)count;
+  (void)x_c;
+  (void)y_c;
+#endif
+}
+
+static void cod_profile_log_simple(const char *func_name, uint64_t dt_us)
+{
+#if COLOR_OBJECT_DETECTOR_PROFILE
+  pthread_mutex_lock(&profile_mutex);
+
+  if (profile_log_file != NULL) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+
+    fprintf(profile_log_file,
+            "%ld.%06ld,%s,%llu us\n",
+            (long)tv.tv_sec,
+            (long)tv.tv_usec,
+            func_name,
+            (unsigned long long)dt_us);
+
+#if COLOR_OBJECT_DETECTOR_PROFILE_FLUSH_EVERY_LINE
+    fflush(profile_log_file);
+#endif
+  }
+
+  pthread_mutex_unlock(&profile_mutex);
+#else
+  (void)func_name;
+  (void)dt_us;
+#endif
+}
 
 #ifndef COLOR_OBJECT_DETECTOR_FPS1
 #define COLOR_OBJECT_DETECTOR_FPS1 0 ///< Default FPS (zero means run at camera fps)
@@ -93,6 +208,8 @@ uint32_t find_object_centroid(struct image_t *img, int32_t* p_xc, int32_t* p_yc,
  */
 static struct image_t *object_detector(struct image_t *img, uint8_t filter)
 {
+  uint64_t t0 = cod_time_now_us();
+
   uint8_t lum_min, lum_max;
   uint8_t cb_min, cb_max;
   uint8_t cr_min, cr_max;
@@ -125,8 +242,9 @@ static struct image_t *object_detector(struct image_t *img, uint8_t filter)
 
   // Filter and find centroid
   uint32_t count = find_object_centroid(img, &x_c, &y_c, draw, lum_min, lum_max, cb_min, cb_max, cr_min, cr_max);
-  VERBOSE_PRINT("Color count %d: %u, threshold %u, x_c %d, y_c %d\n", camera, object_count, count_threshold, x_c, y_c);
-  VERBOSE_PRINT("centroid %d: (%d, %d) r: %4.2f a: %4.2f\n", camera, x_c, y_c,
+
+  VERBOSE_PRINT("count %u, x_c %d, y_c %d\n", count, x_c, y_c);
+  VERBOSE_PRINT("centroid (%d, %d) r: %4.2f a: %4.2f\n", x_c, y_c,
         hypotf(x_c, y_c) / hypotf(img->w * 0.5, img->h * 0.5), RadOfDeg(atan2f(y_c, x_c)));
 
   pthread_mutex_lock(&mutex);
@@ -136,25 +254,38 @@ static struct image_t *object_detector(struct image_t *img, uint8_t filter)
   global_filters[filter-1].updated = true;
   pthread_mutex_unlock(&mutex);
 
+  cod_profile_log("object_detector", cod_time_now_us() - t0, count, x_c, y_c);
+
   return img;
 }
 
 struct image_t *object_detector1(struct image_t *img, uint8_t camera_id);
 struct image_t *object_detector1(struct image_t *img, uint8_t camera_id __attribute__((unused)))
 {
-  return object_detector(img, 1);
+  uint64_t t0 = cod_time_now_us();
+  struct image_t *ret = object_detector(img, 1);
+  cod_profile_log_simple("object_detector1", cod_time_now_us() - t0);
+  return ret;
 }
 
 struct image_t *object_detector2(struct image_t *img, uint8_t camera_id);
 struct image_t *object_detector2(struct image_t *img, uint8_t camera_id __attribute__((unused)))
 {
-  return object_detector(img, 2);
+  uint64_t t0 = cod_time_now_us();
+  struct image_t *ret = object_detector(img, 2);
+  cod_profile_log_simple("object_detector2", cod_time_now_us() - t0);
+  return ret;
 }
 
 void color_object_detector_init(void)
 {
+  uint64_t t0 = cod_time_now_us();
+
   memset(global_filters, 0, 2*sizeof(struct color_object_t));
   pthread_mutex_init(&mutex, NULL);
+  pthread_mutex_init(&profile_mutex, NULL);
+  cod_profile_open_log();
+
 #ifdef COLOR_OBJECT_DETECTOR_CAMERA1
 #ifdef COLOR_OBJECT_DETECTOR_LUM_MIN1
   cod_lum_min1 = COLOR_OBJECT_DETECTOR_LUM_MIN1;
@@ -186,6 +317,8 @@ void color_object_detector_init(void)
 
   cv_add_to_device(&COLOR_OBJECT_DETECTOR_CAMERA2, object_detector2, COLOR_OBJECT_DETECTOR_FPS2, 1);
 #endif
+
+  cod_profile_log_simple("color_object_detector_init", cod_time_now_us() - t0);
 }
 
 /*
@@ -211,6 +344,8 @@ uint32_t find_object_centroid(struct image_t *img, int32_t* p_xc, int32_t* p_yc,
                               uint8_t cb_min, uint8_t cb_max,
                               uint8_t cr_min, uint8_t cr_max)
 {
+  uint64_t t0 = cod_time_now_us();
+
   uint32_t cnt = 0;
   uint32_t tot_x = 0;
   uint32_t tot_y = 0;
@@ -226,14 +361,13 @@ uint32_t find_object_centroid(struct image_t *img, int32_t* p_xc, int32_t* p_yc,
         up = &buffer[y * 2 * img->w + 2 * x];      // U
         yp = &buffer[y * 2 * img->w + 2 * x + 1];  // Y1
         vp = &buffer[y * 2 * img->w + 2 * x + 2];  // V
-        //yp = &buffer[y * 2 * img->w + 2 * x + 3]; // Y2
       } else {
         // Uneven x
         up = &buffer[y * 2 * img->w + 2 * x - 2];  // U
-        //yp = &buffer[y * 2 * img->w + 2 * x - 1]; // Y1
         vp = &buffer[y * 2 * img->w + 2 * x];      // V
         yp = &buffer[y * 2 * img->w + 2 * x + 1];  // Y2
       }
+
       if ( (*yp >= lum_min) && (*yp <= lum_max) &&
            (*up >= cb_min ) && (*up <= cb_max ) &&
            (*vp >= cr_min ) && (*vp <= cr_max )) {
@@ -246,6 +380,7 @@ uint32_t find_object_centroid(struct image_t *img, int32_t* p_xc, int32_t* p_yc,
       }
     }
   }
+
   if (cnt > 0) {
     *p_xc = (int32_t)roundf(tot_x / ((float) cnt) - img->w * 0.5f);
     *p_yc = (int32_t)roundf(img->h * 0.5f - tot_y / ((float) cnt));
@@ -253,24 +388,39 @@ uint32_t find_object_centroid(struct image_t *img, int32_t* p_xc, int32_t* p_yc,
     *p_xc = 0;
     *p_yc = 0;
   }
+
+  cod_profile_log("find_object_centroid", cod_time_now_us() - t0, cnt, *p_xc, *p_yc);
+
   return cnt;
 }
 
 void color_object_detector_periodic(void)
 {
-  static struct color_object_t local_filters[2];
+  uint64_t t0 = cod_time_now_us();
+
+  struct color_object_t local_filters[2];
+
   pthread_mutex_lock(&mutex);
   memcpy(local_filters, global_filters, 2*sizeof(struct color_object_t));
+
+  if (global_filters[0].updated) {
+    global_filters[0].updated = false;
+  }
+  if (global_filters[1].updated) {
+    global_filters[1].updated = false;
+  }
+
   pthread_mutex_unlock(&mutex);
 
   if(local_filters[0].updated){
     AbiSendMsgVISUAL_DETECTION(COLOR_OBJECT_DETECTION1_ID, local_filters[0].x_c, local_filters[0].y_c,
         0, 0, local_filters[0].color_count, 0);
-    local_filters[0].updated = false;
   }
+
   if(local_filters[1].updated){
     AbiSendMsgVISUAL_DETECTION(COLOR_OBJECT_DETECTION2_ID, local_filters[1].x_c, local_filters[1].y_c,
         0, 0, local_filters[1].color_count, 1);
-    local_filters[1].updated = false;
   }
+
+  cod_profile_log_simple("color_object_detector_periodic", cod_time_now_us() - t0);
 }
