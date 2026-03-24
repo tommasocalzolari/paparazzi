@@ -18,4 +18,3 @@ extern void navigation_controller_init(void);
 extern void navigation_controller_periodic(void);
 
 #endif
-
