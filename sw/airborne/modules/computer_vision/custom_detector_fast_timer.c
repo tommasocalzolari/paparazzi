@@ -502,7 +502,7 @@ static void build_masks(const struct image_t *img)
    *   - logical orange mask
    *   - logical green mask
    *
-   * This avoids calling yuv422_get_pixel_rot() for every pixel.
+   * 
    * --------------------------------------------------------- */
   for (uint16_t sy = 0; sy < sh; sy++) {
     uint8_t *row = &img->buf[(uint32_t)sy * 2U * (uint32_t)sw];
@@ -652,7 +652,6 @@ static void build_masks(const struct image_t *img)
   /* ---------------------------------------------------------
    * PASS 2:
    * Compute logical horizontal gradient from logical Y image.
-   * This preserves the previous edge-mask meaning:
    * edge at x if |Y(x+1) - Y(x-1)| >= threshold
    * --------------------------------------------------------- */
   if (lw >= 3U) {

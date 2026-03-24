@@ -238,8 +238,8 @@ int16_t objectMiddleAccum = 0;
 int16_t objectRightAccum = 0;
 
 // Filtering parameters
-int16_t confidenceThreshold = 3;
-int16_t confidenceMax = 6;
+int16_t confidenceThreshold = 2; // lower to make it more reactive :  init value = 3
+int16_t confidenceMax = 4;       // lower to make it more reactive :  init value = 6
 
 // Orange-avoider-like confidence for forward motion
 int16_t obstacle_free_confidence = 0;
@@ -320,9 +320,9 @@ void navigation_controller_periodic(void)
   // Orange-avoider-like free-path confidence update
   // ---------------------------------------------------------------------------
   if (!anyObstacleConfirmed) {
-    obstacle_free_confidence++;
+    obstacle_free_confidence += 2;   // it was +1
   } else {
-    obstacle_free_confidence -= 2;
+    obstacle_free_confidence--;  // it was -2
   }
 
   obstacle_free_confidence = clamp_i16(obstacle_free_confidence, 0, max_trajectory_confidence);
@@ -350,9 +350,10 @@ void navigation_controller_periodic(void)
           navigation_state = OBSTACLE_LEFT;
         } else if (rightConfirmed && !leftConfirmed) {
           navigation_state = OBSTACLE_RIGHT;
-        } else {
-          navigation_state = OBSTACLE_MIDDLE;
-        }
+        } 
+        //else {
+        //  navigation_state = OBSTACLE_MIDDLE;
+        //}
       } else {
         moveWaypointForward(WP_GOAL, moveDistance);
       }
@@ -391,10 +392,9 @@ void navigation_controller_periodic(void)
     case SEARCH_FOR_SAFE_HEADING:
       increase_nav_heading(heading_increment);
 
-      if (obstacle_free_confidence >= 2 &&
-          !leftConfirmed && !middleConfirmed && !rightConfirmed) {
-        navigation_state = SAFE;
-      }
+    if (obstacle_free_confidence >= 2 && !middleConfirmed) {
+          navigation_state = SAFE;
+        }
       break;
 
     case OUT_OF_BOUNDS:
