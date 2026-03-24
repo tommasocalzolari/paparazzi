@@ -22,12 +22,13 @@
 #include "generated/airframe.h"
 #include "state.h"
 #include "modules/core/abi.h"
+#include "mcu_periph/sys_time.h"
 #include <time.h>
 #include <stdio.h>
 
 #include "generated/flight_plan.h"
 
-#define CUSTOM_AVOIDER_VERBOSE TRUE
+#define CUSTOM_AVOIDER_VERBOSE true
 
 #define PRINT(string,...) fprintf(stderr, "[custom_avoider->%s()] " string,__FUNCTION__ , ##__VA_ARGS__)
 #if CUSTOM_AVOIDER_VERBOSE
@@ -41,6 +42,9 @@ static uint8_t calculateForwards(struct EnuCoor_i *new_coor, float distanceMeter
 static uint8_t moveWaypoint(uint8_t waypoint, struct EnuCoor_i *new_coor);
 static uint8_t increase_nav_heading(float incrementDegrees);
 static uint8_t chooseRandomIncrementAvoidance(void);
+static void update_filtered_detection(uint8_t raw_detection, uint8_t *filtered_detection,
+                                     uint8_t *candidate_detection, uint8_t *confirm_count,
+                                     uint32_t *last_switch_ms, uint32_t now_ms);
 
 enum navigation_state_t {
   SAFE,
@@ -60,16 +64,34 @@ uint8_t objectLeft = 0;
 uint8_t objectMiddle = 0;
 uint8_t objectRight = 0;
 
-uint8_t objectLeftAccum = 0;
-uint8_t objectMiddleAccum = 0;
-uint8_t objectRightAccum = 0;
+uint8_t objectLeftFiltered = 0;
+uint8_t objectMiddleFiltered = 0;
+uint8_t objectRightFiltered = 0;
 
-uint8_t confidenceThreshold = 1;
+uint8_t objectLeftCandidate = 0;
+uint8_t objectMiddleCandidate = 0;
+uint8_t objectRightCandidate = 0;
+
+uint8_t objectLeftConfirmCount = 0;
+uint8_t objectMiddleConfirmCount = 0;
+uint8_t objectRightConfirmCount = 0;
+
+uint32_t objectLeftLastSwitchMs = 0;
+uint32_t objectMiddleLastSwitchMs = 0;
+uint32_t objectRightLastSwitchMs = 0;
+
+#ifndef CUSTOM_AVOIDER_CONFIRM_SAMPLES
+#define CUSTOM_AVOIDER_CONFIRM_SAMPLES 3
+#endif
+
+#ifndef CUSTOM_AVOIDER_HOLD_TIME_MS
+#define CUSTOM_AVOIDER_HOLD_TIME_MS 300U
+#endif
 
 
 float heading_increment = 1.f;          // heading angle increment [deg]
 float maxDistance = 2.25;               // max waypoint displacement [m]
-
+bool updateWaypoint = true;                // whether to update the waypoint position or just change heading when avoiding
 
 /*
  * This next section defines an ABI messaging event (http://wiki.paparazziuav.org/wiki/ABI), necessary
@@ -91,6 +113,7 @@ static void object_detection_cb(uint8_t __attribute__((unused)) sender_id,
   objectLeft = left;
   objectMiddle = middle;
   objectRight = right;
+  updateWaypoint = true;
 }
 
 /*
@@ -98,9 +121,16 @@ static void object_detection_cb(uint8_t __attribute__((unused)) sender_id,
  */
 void navigation_controller_init(void)
 {
+  uint32_t now_ms = get_sys_time_msec();
+
   // Initialise random values
   srand(time(NULL));
   chooseRandomIncrementAvoidance();
+
+  // Allow first validated transitions to happen immediately.
+  objectLeftLastSwitchMs = now_ms - CUSTOM_AVOIDER_HOLD_TIME_MS;
+  objectMiddleLastSwitchMs = now_ms - CUSTOM_AVOIDER_HOLD_TIME_MS;
+  objectRightLastSwitchMs = now_ms - CUSTOM_AVOIDER_HOLD_TIME_MS;
 
   // bind our colorfilter callbacks to receive the color filter outputs
   AbiBindMsgCUSTOM_DETECTION(CUSTOM_AVOIDER_CUSTOM_DETECTION_ID, &color_detection_ev, object_detection_cb);
@@ -116,36 +146,44 @@ void navigation_controller_periodic(void)
     return;
   }
 
+  if(updateWaypoint){
+    updateWaypoint = false;
+  } else {
+    return;
+  }
+
   // bound obstacle_free_confidence
 
-  float moveDistance = 0.2f; // default move distance [m]
+  float moveDistance = 0.5f; // default move distance [m]
   float headingIncrement = 1.0f; // default heading increment [deg]
+  uint32_t now_ms = get_sys_time_msec();
  
-  VERBOSE_PRINT("Object detections - Left: %d, Middle: %d, Right: %d\n", objectLeft, objectMiddle, objectRight);
+  update_filtered_detection(objectLeft, &objectLeftFiltered, &objectLeftCandidate,
+                            &objectLeftConfirmCount, &objectLeftLastSwitchMs, now_ms);
+  update_filtered_detection(objectMiddle, &objectMiddleFiltered, &objectMiddleCandidate,
+                            &objectMiddleConfirmCount, &objectMiddleLastSwitchMs, now_ms);
+  update_filtered_detection(objectRight, &objectRightFiltered, &objectRightCandidate,
+                            &objectRightConfirmCount, &objectRightLastSwitchMs, now_ms);
 
-  if (objectLeft == 1) {objectLeftAccum ++;}else{objectLeftAccum --;}
-  if (objectMiddle == 1) {objectMiddleAccum ++;}else{objectMiddleAccum --;}
-  if (objectRight == 1) {objectRightAccum ++;}else{objectRightAccum --;}
-
-  if(objectLeftAccum < 0) objectLeftAccum = 0;
-  if(objectMiddleAccum < 0) objectMiddleAccum = 0;
-  if(objectRightAccum < 0) objectRightAccum = 0;
+  VERBOSE_PRINT("Object detections - raw L:%d M:%d R:%d | filtered L:%d M:%d R:%d\n",
+                objectLeft, objectMiddle, objectRight,
+                objectLeftFiltered, objectMiddleFiltered, objectRightFiltered);
 
 
   switch (navigation_state){
     case SAFE:
       // Move waypoint forward
-      moveWaypointForward(WP_TRAJECTORY, 1.5f * moveDistance);
+      moveWaypointForward(WP_TRAJECTORY, moveDistance);
       if (!InsideObstacleZone(WaypointX(WP_TRAJECTORY),WaypointY(WP_TRAJECTORY))){
         navigation_state = OUT_OF_BOUNDS;
         //VERBOSE_PRINT("Sate: OUT_OF_BOUNDS\n");
-      } else if(objectMiddleAccum >= confidenceThreshold){
+      } else if(objectMiddleFiltered == 1){
         navigation_state = OBSTACLE_MIDDLE;
         //VERBOSE_PRINT("State: OBSTACLE_MIDDLE\n");
-      } else if (objectLeftAccum >= confidenceThreshold && objectRightAccum < confidenceThreshold){
+      } else if (objectLeftFiltered == 1 && objectRightFiltered == 0){
         navigation_state = OBSTACLE_LEFT;
         //VERBOSE_PRINT("State: OBSTACLE_LEFT\n");
-      } else if (objectRightAccum >= confidenceThreshold && objectLeftAccum < confidenceThreshold){
+      } else if (objectRightFiltered == 1 && objectLeftFiltered == 0){
         navigation_state = OBSTACLE_RIGHT;
         //VERBOSE_PRINT("State: OBSTACLE_RIGHT\n");
       } else {
@@ -160,7 +198,7 @@ void navigation_controller_periodic(void)
 
       increase_nav_heading(headingIncrement);
 
-      if(objectLeftAccum < confidenceThreshold){
+      if(objectLeftFiltered == 0){
         navigation_state = SAFE;
         //VERBOSE_PRINT("State: SAFE\n");
       }
@@ -174,7 +212,7 @@ void navigation_controller_periodic(void)
 
       increase_nav_heading(-headingIncrement);
 
-      if(objectRightAccum < confidenceThreshold){
+      if(objectRightFiltered == 0){
         navigation_state = SAFE;
         //VERBOSE_PRINT("State: SAFE\n");
       }
@@ -196,7 +234,7 @@ void navigation_controller_periodic(void)
     increase_nav_heading(heading_increment);
 
       // make sure we have a couple of good readings before declaring the way safe
-      if (objectLeft == 0 && objectMiddle == 0 && objectRight == 0){
+      if (objectLeftFiltered == 0 && objectMiddleFiltered == 0 && objectRightFiltered == 0){
         navigation_state = SAFE;
         //VERBOSE_PRINT("State: SAFE\n");
       }
@@ -218,6 +256,34 @@ void navigation_controller_periodic(void)
       break;
   }
   return;
+}
+
+/*
+ * Filter binary detections using K-confirm transitions plus a minimum switch hold time.
+ */
+static void update_filtered_detection(uint8_t raw_detection, uint8_t *filtered_detection,
+                                      uint8_t *candidate_detection, uint8_t *confirm_count,
+                                      uint32_t *last_switch_ms, uint32_t now_ms)
+{
+  if (raw_detection == *filtered_detection) {
+    *confirm_count = 0;
+    *candidate_detection = raw_detection;
+    return;
+  }
+
+  if (raw_detection != *candidate_detection) {
+    *candidate_detection = raw_detection;
+    *confirm_count = 1;
+  } else if (*confirm_count < 255) {
+    (*confirm_count)++;
+  }
+
+  if ((*confirm_count >= CUSTOM_AVOIDER_CONFIRM_SAMPLES) &&
+      ((now_ms - *last_switch_ms) >= CUSTOM_AVOIDER_HOLD_TIME_MS)) {
+    *filtered_detection = raw_detection;
+    *last_switch_ms = now_ms;
+    *confirm_count = 0;
+  }
 }
 
 
