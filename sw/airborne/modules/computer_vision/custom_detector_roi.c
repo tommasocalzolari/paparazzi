@@ -2,6 +2,7 @@
  * Pure C Paparazzi detector derived from Python prototype:
  *  - orange YUV mask + vertical-band grouping
  *  - green YUV mask + edge-supported structured detection
+ *  - blue YUV mask + connected-components obstacle detection
  *  - 3-column risk evaluation
  *
  * Real path does not depend on OpenCV.
@@ -106,6 +107,44 @@
 #endif
 #ifndef CCRD_GREEN_VU_MIN
 #define CCRD_GREEN_VU_MIN 20
+#endif
+
+#ifndef CCRD_BLUE_Y_MIN
+#define CCRD_BLUE_Y_MIN 80
+#endif
+#ifndef CCRD_BLUE_Y_MAX
+#define CCRD_BLUE_Y_MAX 200
+#endif
+#ifndef CCRD_BLUE_U_MIN
+#define CCRD_BLUE_U_MIN 150
+#endif
+#ifndef CCRD_BLUE_U_MAX
+#define CCRD_BLUE_U_MAX 190
+#endif
+#ifndef CCRD_BLUE_V_MIN
+#define CCRD_BLUE_V_MIN 70
+#endif
+#ifndef CCRD_BLUE_V_MAX
+#define CCRD_BLUE_V_MAX 130
+#endif
+
+#ifndef CCRD_BLUE_MIN_SUPPORTED_PIXELS
+#define CCRD_BLUE_MIN_SUPPORTED_PIXELS 45
+#endif
+#ifndef CCRD_BLUE_MIN_RATIO_NUM
+#define CCRD_BLUE_MIN_RATIO_NUM 1
+#endif
+#ifndef CCRD_BLUE_MIN_RATIO_DEN
+#define CCRD_BLUE_MIN_RATIO_DEN 10
+#endif
+#ifndef CCRD_BLUE_MIN_ASPECT_NUM
+#define CCRD_BLUE_MIN_ASPECT_NUM 2
+#endif
+#ifndef CCRD_BLUE_MIN_ASPECT_DEN
+#define CCRD_BLUE_MIN_ASPECT_DEN 1
+#endif
+#ifndef CCRD_BLUE_MIN_HEIGHT
+#define CCRD_BLUE_MIN_HEIGHT 30
 #endif
 
 
@@ -256,6 +295,12 @@
 #ifndef CCRD_GREEN_MIDDLE_ROWS_THRESHOLD_DEN
 #define CCRD_GREEN_MIDDLE_ROWS_THRESHOLD_DEN 100
 #endif
+#ifndef CCRD_BLUE_MIDDLE_ROWS_THRESHOLD_NUM
+#define CCRD_BLUE_MIDDLE_ROWS_THRESHOLD_NUM 30
+#endif
+#ifndef CCRD_BLUE_MIDDLE_ROWS_THRESHOLD_DEN
+#define CCRD_BLUE_MIDDLE_ROWS_THRESHOLD_DEN 100
+#endif
 
 #ifndef CCRD_MAX_PIXELS
 #define CCRD_MAX_PIXELS (640 * 480)
@@ -271,6 +316,9 @@
 #endif
 #ifndef CCRD_MAX_GREEN_OBJECTS
 #define CCRD_MAX_GREEN_OBJECTS 32
+#endif
+#ifndef CCRD_MAX_BLUE_OBJECTS
+#define CCRD_MAX_BLUE_OBJECTS 4
 #endif
 
 #ifndef CCRD_MAX_DIM
@@ -301,10 +349,13 @@ struct component_t {
 struct region_metrics_t {
   uint32_t orange_count;
   uint32_t green_count;
+  uint32_t blue_count;
   uint32_t orange_total;
   uint32_t green_total;
+  uint32_t blue_total;
   bool orange_blocked;
   bool green_blocked;
+  bool blue_blocked;
   bool blocked;
   uint8_t risk_score;
 };
@@ -323,9 +374,11 @@ static struct risk_result_t g_result;
 static uint8_t orange_mask[CCRD_MAX_PIXELS];
 static uint8_t edge_mask[CCRD_MAX_PIXELS];
 static uint8_t green_mask[CCRD_MAX_PIXELS];
+static uint8_t blue_mask[CCRD_MAX_PIXELS];
 static uint8_t green_supported[CCRD_MAX_PIXELS];
 static uint8_t orange_valid[CCRD_MAX_PIXELS];
 static uint8_t green_valid[CCRD_MAX_PIXELS];
+static uint8_t blue_valid[CCRD_MAX_PIXELS];
 static uint8_t visited[CCRD_MAX_PIXELS];
 static uint8_t y_logical[CCRD_MAX_PIXELS];
 
@@ -553,9 +606,11 @@ static void build_masks(const struct image_t *img)
 
   memset(orange_mask, 0, (size_t)lw * lh);
   memset(green_mask, 0, (size_t)lw * lh);
+  memset(blue_mask, 0, (size_t)lw * lh);
   memset(edge_mask, 0, (size_t)lw * lh);
   memset(orange_valid, 0, (size_t)lw * lh);
   memset(green_valid, 0, (size_t)lw * lh);
+  memset(blue_valid, 0, (size_t)lw * lh);
   memset(y_logical, 0, (size_t)lw * lh);
 
   for (uint16_t sy = 0; sy < sh; sy++) {
@@ -609,6 +664,12 @@ static void build_masks(const struct image_t *img)
                 vu >= CCRD_GREEN_VU_MIN) {
               green_mask[idx] = 1U;
             }
+
+            if (y0 >= CCRD_BLUE_Y_MIN && y0 <= CCRD_BLUE_Y_MAX &&
+                u  >= CCRD_BLUE_U_MIN && u  <= CCRD_BLUE_U_MAX &&
+                v  >= CCRD_BLUE_V_MIN && v  <= CCRD_BLUE_V_MAX) {
+              blue_mask[idx] = 1U;
+            }
           }
         }
       }
@@ -653,6 +714,12 @@ static void build_masks(const struct image_t *img)
                 v  >= CCRD_GREEN_V_MIN && v  <= CCRD_GREEN_V_MAX &&
                 vu >= CCRD_GREEN_VU_MIN) {
               green_mask[idx] = 1U;
+            }
+
+            if (y1 >= CCRD_BLUE_Y_MIN && y1 <= CCRD_BLUE_Y_MAX &&
+                u  >= CCRD_BLUE_U_MIN && u  <= CCRD_BLUE_U_MAX &&
+                v  >= CCRD_BLUE_V_MIN && v  <= CCRD_BLUE_V_MAX) {
+              blue_mask[idx] = 1U;
             }
           }
         }
@@ -702,6 +769,12 @@ static void build_masks(const struct image_t *img)
               v  >= CCRD_GREEN_V_MIN && v  <= CCRD_GREEN_V_MAX &&
               vu >= CCRD_GREEN_VU_MIN) {
             green_mask[idx] = 1U;
+          }
+
+          if (yv >= CCRD_BLUE_Y_MIN && yv <= CCRD_BLUE_Y_MAX &&
+              u  >= CCRD_BLUE_U_MIN && u  <= CCRD_BLUE_U_MAX &&
+              v  >= CCRD_BLUE_V_MIN && v  <= CCRD_BLUE_V_MAX) {
+            blue_mask[idx] = 1U;
           }
         }
       }
@@ -1139,6 +1212,117 @@ static uint16_t detect_green_objects(const struct image_t *img, struct bbox_t *o
   return nobj;
 }
 
+static uint16_t detect_blue_objects(const struct image_t *img, struct bbox_t *objects)
+{
+  const uint16_t w = ccrd_w(img);
+  const uint16_t h = ccrd_h(img);
+  const uint32_t npix = (uint32_t)w * (uint32_t)h;
+  const uint16_t blue_y1 = ccrd_green_roi_y1(h);
+  const uint16_t blue_y2 = ccrd_green_roi_y2(h);
+  uint16_t nobj = 0;
+
+  memset(visited, 0, npix);
+
+  for (uint16_t y = blue_y1; y < blue_y2; y++) {
+    for (uint16_t x = 0; x < w; x++) {
+      const uint32_t start_idx = idx_of(w, x, y);
+      if (blue_mask[start_idx] == 0U || visited[start_idx] != 0U) {
+        continue;
+      }
+
+      uint32_t sp = 0U;
+      stack_buf[sp++] = start_idx;
+      visited[start_idx] = 1U;
+
+      uint32_t area = 0U;
+      uint16_t x1 = x, x2 = x, y1 = y, y2 = y;
+
+      while (sp > 0U) {
+        uint32_t idx = stack_buf[--sp];
+        uint16_t cx = (uint16_t)(idx % w);
+        uint16_t cy = (uint16_t)(idx / w);
+        area++;
+
+        if (cx < x1) x1 = cx;
+        if (cx > x2) x2 = cx;
+        if (cy < y1) y1 = cy;
+        if (cy > y2) y2 = cy;
+
+        if (cx > 0U) {
+          uint32_t n = idx - 1U;
+          if (blue_mask[n] != 0U && visited[n] == 0U) {
+            visited[n] = 1U;
+            stack_buf[sp++] = n;
+          }
+        }
+        if (cx + 1U < w) {
+          uint32_t n = idx + 1U;
+          if (blue_mask[n] != 0U && visited[n] == 0U) {
+            visited[n] = 1U;
+            stack_buf[sp++] = n;
+          }
+        }
+        if (cy > blue_y1) {
+          uint32_t n = idx - w;
+          if (blue_mask[n] != 0U && visited[n] == 0U) {
+            visited[n] = 1U;
+            stack_buf[sp++] = n;
+          }
+        }
+        if (cy + 1U < blue_y2) {
+          uint32_t n = idx + w;
+          if (blue_mask[n] != 0U && visited[n] == 0U) {
+            visited[n] = 1U;
+            stack_buf[sp++] = n;
+          }
+        }
+      }
+
+      if (area < CCRD_BLUE_MIN_SUPPORTED_PIXELS) {
+        continue;
+      }
+
+      const uint16_t bx2 = (uint16_t)(x2 + 1U);
+      const uint16_t by2 = (uint16_t)(y2 + 1U);
+      const uint16_t bw = (uint16_t)(bx2 - x1);
+      const uint16_t bh = (uint16_t)(by2 - y1);
+      uint32_t raw_box_count = 0U;
+
+      for (uint16_t yy = y1; yy < by2; yy++) {
+        for (uint16_t xx = x1; xx < bx2; xx++) {
+          raw_box_count += blue_mask[idx_of(w, xx, yy)] ? 1U : 0U;
+        }
+      }
+
+      if (!ratio_ge_u32(raw_box_count, area, CCRD_BLUE_MIN_RATIO_NUM, CCRD_BLUE_MIN_RATIO_DEN)) {
+        continue;
+      }
+      if (bh < CCRD_BLUE_MIN_HEIGHT) {
+        continue;
+      }
+      if ((uint32_t)bh * CCRD_BLUE_MIN_ASPECT_DEN < (uint32_t)bw * CCRD_BLUE_MIN_ASPECT_NUM) {
+        continue;
+      }
+
+      if (nobj < CCRD_MAX_BLUE_OBJECTS) {
+        objects[nobj].x1 = x1;
+        objects[nobj].y1 = y1;
+        objects[nobj].x2 = bx2;
+        objects[nobj].y2 = by2;
+        nobj++;
+      }
+
+      for (uint16_t yy = y1; yy < by2; yy++) {
+        for (uint16_t xx = x1; xx < bx2; xx++) {
+          blue_valid[idx_of(w, xx, yy)] = blue_mask[idx_of(w, xx, yy)];
+        }
+      }
+    }
+  }
+
+  return nobj;
+}
+
 static void compute_risk_map(const struct image_t *img, struct risk_result_t *result)
 {
   const uint16_t w = ccrd_w(img);
@@ -1150,6 +1334,8 @@ static void compute_risk_map(const struct image_t *img, struct risk_result_t *re
   const uint16_t orange_y2 = row_edges[4];
   const uint16_t green_y1 = row_edges[1];
   const uint16_t green_y2 = row_edges[3];
+  const uint16_t blue_y1 = row_edges[1];
+  const uint16_t blue_y2 = row_edges[3];
 
   result->left = 0U;
   result->middle = 0U;
@@ -1160,8 +1346,10 @@ static void compute_risk_map(const struct image_t *img, struct risk_result_t *re
     uint16_t x2 = col_edges[i + 1U];
     uint32_t orange_count = 0U;
     uint32_t green_count = 0U;
+    uint32_t blue_count = 0U;
     uint32_t orange_total = (uint32_t)(x2 - x1) * (uint32_t)(orange_y2 - orange_y1);
     uint32_t green_total = (uint32_t)(x2 - x1) * (uint32_t)(green_y2 - green_y1);
+    uint32_t blue_total = (uint32_t)(x2 - x1) * (uint32_t)(blue_y2 - blue_y1);
 
     for (uint16_t y = orange_y1; y < orange_y2; y++) {
       for (uint16_t x = x1; x < x2; x++) {
@@ -1173,26 +1361,41 @@ static void compute_risk_map(const struct image_t *img, struct risk_result_t *re
         green_count += green_valid[idx_of(w, x, y)] ? 1U : 0U;
       }
     }
+    for (uint16_t y = blue_y1; y < blue_y2; y++) {
+      for (uint16_t x = x1; x < x2; x++) {
+        blue_count += blue_valid[idx_of(w, x, y)] ? 1U : 0U;
+      }
+    }
 
     result->metrics[i].orange_count = orange_count;
     result->metrics[i].green_count = green_count;
+    result->metrics[i].blue_count = blue_count;
     result->metrics[i].orange_total = orange_total;
     result->metrics[i].green_total = green_total;
+    result->metrics[i].blue_total = blue_total;
     result->metrics[i].orange_blocked = ratio_ge_u32(orange_count, orange_total,
                                                      CCRD_ORANGE_BOTTOM_ROWS_THRESHOLD_NUM,
                                                      CCRD_ORANGE_BOTTOM_ROWS_THRESHOLD_DEN);
     result->metrics[i].green_blocked = ratio_ge_u32(green_count, green_total,
                                                     CCRD_GREEN_MIDDLE_ROWS_THRESHOLD_NUM,
                                                     CCRD_GREEN_MIDDLE_ROWS_THRESHOLD_DEN);
-    result->metrics[i].blocked = result->metrics[i].orange_blocked || result->metrics[i].green_blocked;
+    result->metrics[i].blue_blocked = ratio_ge_u32(blue_count, blue_total,
+                                                   CCRD_BLUE_MIDDLE_ROWS_THRESHOLD_NUM,
+                                                   CCRD_BLUE_MIDDLE_ROWS_THRESHOLD_DEN);
+    result->metrics[i].blocked = result->metrics[i].orange_blocked ||
+                                 result->metrics[i].green_blocked ||
+                                 result->metrics[i].blue_blocked;
     result->metrics[i].risk_score = (result->metrics[i].orange_blocked ? 2U : 0U) +
-                                    (result->metrics[i].green_blocked ? 2U : 0U);
+                                    (result->metrics[i].green_blocked ? 2U : 0U) +
+                                    (result->metrics[i].blue_blocked ? 2U : 0U);
 
     if (CUSTOM_COLOR_RISK_DETECTOR_DEBUG) {
       draw_rect_y((struct image_t *)img, x1, orange_y1, x2, orange_y2,
                   result->metrics[i].orange_blocked ? 200 : 120);
       draw_rect_y((struct image_t *)img, x1, green_y1, x2, green_y2,
                   result->metrics[i].green_blocked ? 255 : 80);
+      draw_rect_y((struct image_t *)img, x1, blue_y1, x2, blue_y2,
+                  result->metrics[i].blue_blocked ? 210 : 60);
       draw_rect_y((struct image_t *)img, x1, 0U, x2, h,
                   result->metrics[i].blocked ? 255 : 180);
     }
@@ -1208,6 +1411,7 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img, uint
   struct orange_band_t bands[CCRD_MAX_ORANGE_BANDS];
   struct bbox_t orange_objects[CCRD_MAX_ORANGE_OBJECTS];
   struct bbox_t green_objects[CCRD_MAX_GREEN_OBJECTS];
+  struct bbox_t blue_objects[CCRD_MAX_BLUE_OBJECTS];
   struct risk_result_t local_result;
 
   const uint32_t npix = (uint32_t)img->w * (uint32_t)img->h;
@@ -1232,6 +1436,8 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img, uint
   uint16_t ngreen = detect_green_objects(img, green_objects);
   t4 = clock();
 
+  uint16_t nblue = detect_blue_objects(img, blue_objects);
+
   compute_risk_map(img, &local_result);
   t5 = clock();
 
@@ -1246,6 +1452,10 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img, uint
     for (uint16_t i = 0; i < ngreen; i++) {
       draw_rect_y(img, green_objects[i].x1, green_objects[i].y1,
                   green_objects[i].x2, green_objects[i].y2, 150);
+    }
+    for (uint16_t i = 0; i < nblue; i++) {
+      draw_rect_y(img, blue_objects[i].x1, blue_objects[i].y1,
+                  blue_objects[i].x2, blue_objects[i].y2, 100);
     }
   }
 
@@ -1266,9 +1476,9 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img, uint
     double ms_debug_draw   = 1000.0 * (double)(t6 - t5) / (double)CLOCKS_PER_SEC;
     double ms_total        = 1000.0 * (double)(t6 - t0) / (double)CLOCKS_PER_SEC;
 
-    VERBOSE_PRINT("frame=%lu orange_objects=%u green_objects=%u risk=[%u,%u,%u]\n",
+    VERBOSE_PRINT("frame=%lu orange_objects=%u green_objects=%u blue_objects=%u risk=[%u,%u,%u]\n",
                   (unsigned long)ccrd_frame_counter,
-                  norange, ngreen,
+            norange, ngreen, nblue,
                   local_result.left, local_result.middle, local_result.right);
 
     VERBOSE_PRINT("timing_ms frame=%lu masks=%.3f scan_orange=%.3f group_orange=%.3f detect_green=%.3f risk=%.3f debug=%.3f total=%.3f\n",
