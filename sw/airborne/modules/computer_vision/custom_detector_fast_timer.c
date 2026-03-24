@@ -15,7 +15,7 @@
  * Added:
  *  - logging to file on drone
  *  - timing of major pipeline blocks
- *  - print every 20 frames
+ *  - print every 20 
  */
 
 #include "modules/computer_vision/custom_detector_fast_timer.h"

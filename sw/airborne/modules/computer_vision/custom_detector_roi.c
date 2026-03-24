@@ -559,7 +559,9 @@ static void build_masks(const struct image_t *img)
   memset(y_logical, 0, (size_t)lw * lh);
 
   for (uint16_t sy = 0; sy < sh; sy++) {
-    uint8_t *row = &img->buf[(uint32_t)sy * 2U * (uint32_t)sw];
+    uint8_t *buf = (uint8_t *)img->buf;
+    uint8_t *row = &buf[(uint32_t)sy * 2U * (uint32_t)sw];
+    //uint8_t *row = &img->buf[(uint32_t)sy * 2U * (uint32_t)sw];
 
     for (uint16_t sx_pair = 0; sx_pair + 1U < sw; sx_pair += 2U) {
       uint8_t u  = row[2U * sx_pair + 0U];

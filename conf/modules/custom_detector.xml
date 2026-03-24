@@ -99,7 +99,7 @@
 
   <makefile target="ap|nps">
    <!--<file name="custom_detector_fast_rotated.c"/> --> 
-   <file name="custom_detector_fast_timer.c"/>
-   <!--<file name="custom_detector_roi.c"/>-->
+   <!--<file name="custom_detector_fast_timer.c"/>-->
+   <file name="custom_detector_roi.c"/>
   </makefile>
 </module>
