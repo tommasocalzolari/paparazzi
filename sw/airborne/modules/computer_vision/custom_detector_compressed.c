@@ -31,7 +31,7 @@
 #endif
 
 #ifndef CUSTOM_COLOR_RISK_DETECTOR_DEBUG
-#define CUSTOM_COLOR_RISK_DETECTOR_DEBUG false
+#define CUSTOM_COLOR_RISK_DETECTOR_DEBUG true
 #endif
 
 #ifndef CUSTOM_COLOR_RISK_DETECTOR_CAMERA
@@ -43,7 +43,7 @@
 #endif
 
 #ifndef CCRD_ROTATE_MODE
-#define CCRD_ROTATE_MODE 1
+#define CCRD_ROTATE_MODE 2
 #endif
 
 #ifndef CCRD_ENABLE_DOWNSAMPLE
@@ -421,6 +421,64 @@ static inline void yuv422_set_y_rot(struct image_t *img, uint16_t x, uint16_t y,
   uint16_t sx, sy;
   ccrd_map_coords(img, x, y, &sx, &sy);
   yuv422_set_y(img, sx, sy, value);
+}
+
+static inline void yuv422_set_pixel(struct image_t *img, uint16_t x, uint16_t y,
+                                    uint8_t yy, uint8_t uu, uint8_t vv)
+{
+  uint8_t *buffer = (uint8_t *)img->buf;
+  uint32_t base = (uint32_t)y * 2U * (uint32_t)img->w;
+
+  if ((x & 1U) == 0U) {
+    buffer[base + 2U * x + 0U] = uu;
+    buffer[base + 2U * x + 1U] = yy;
+    if (x + 1U < img->w) {
+      buffer[base + 2U * x + 2U] = vv;
+    }
+  } else {
+    buffer[base + 2U * x - 2U] = uu;
+    buffer[base + 2U * x + 1U] = yy;
+    buffer[base + 2U * x + 0U] = vv;
+  }
+}
+
+static void copy_downsampled_to_fullres_debug(struct image_t *dst,
+                                              const struct image_t *src,
+                                              uint8_t ds)
+{
+  uint16_t y, x;
+
+  if (dst == NULL || src == NULL || ds <= 1U) {
+    return;
+  }
+
+  for (y = 0U; y < dst->h; y++) {
+    uint16_t sy = (uint16_t)(y / ds);
+    if (sy >= src->h) {
+      sy = (uint16_t)(src->h - 1U);
+    }
+
+    for (x = 0U; x < dst->w; x++) {
+      uint16_t sx = (uint16_t)(x / ds);
+      uint8_t yy, uu, vv;
+
+      if (sx >= src->w) {
+        sx = (uint16_t)(src->w - 1U);
+      }
+
+      yuv422_get_pixel(src, sx, sy, &yy, &uu, &vv);
+      yuv422_set_pixel(dst, x, y, yy, uu, vv);
+    }
+  }
+}
+
+static inline uint16_t scale_coord_to_full(uint16_t v, uint8_t ds, uint16_t limit)
+{
+  uint32_t s = (uint32_t)v * (uint32_t)ds;
+  if (s > limit) {
+    s = limit;
+  }
+  return (uint16_t)s;
 }
 
 static void draw_rect_y(struct image_t *img, uint16_t x1, uint16_t y1,
@@ -1073,6 +1131,7 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img,
   uint32_t input_npixels = (uint32_t)img->w * (uint32_t)img->h;
   uint64_t t0, t1, t2, t3, t4, t5, t6, t7;
   uint16_t nbands, norange, ngreen;
+  uint8_t ds_used = 1U;
 
   if (img->type != IMAGE_YUV422) {
     return img;
@@ -1102,6 +1161,7 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img,
       downsampled_img.buf = downsample_buf;
       image_yuv422_downsample(img, &downsampled_img, ds);
       proc = &downsampled_img;
+      ds_used = ds;
     }
   }
 #endif
@@ -1124,16 +1184,66 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img,
 
   if (CUSTOM_COLOR_RISK_DETECTOR_DEBUG) {
     uint16_t i;
-    draw_grid_debug(proc);
-    for (i = 0U; i < norange; i++) {
-      draw_rect_y(proc,
-                  orange_objects[i].x1, orange_objects[i].y1,
-                  orange_objects[i].x2, orange_objects[i].y2, 220U);
+    uint16_t full_lw = ccrd_w(img);
+    uint16_t full_lh = ccrd_h(img);
+
+    /* Show in simulation the enlarged downsampled image actually used by detector */
+    if (proc != img) {
+      copy_downsampled_to_fullres_debug(img, proc, ds_used);
     }
+
+    /* Draw full-resolution grid on the image that is actually returned */
+    draw_grid_debug(img);
+
+    /* Draw orange boxes scaled back to full-resolution logical coordinates */
+    for (i = 0U; i < norange; i++) {
+      uint16_t x1 = scale_coord_to_full(orange_objects[i].x1, ds_used, full_lw);
+      uint16_t y1 = scale_coord_to_full(orange_objects[i].y1, ds_used, full_lh);
+      uint16_t x2 = scale_coord_to_full(orange_objects[i].x2, ds_used, full_lw);
+      uint16_t y2 = scale_coord_to_full(orange_objects[i].y2, ds_used, full_lh);
+
+      if (x2 > full_lw) { x2 = full_lw; }
+      if (y2 > full_lh) { y2 = full_lh; }
+
+      draw_rect_y(img, x1, y1, x2, y2, 220U);
+    }
+
+    /* Draw green boxes scaled back to full-resolution logical coordinates */
     for (i = 0U; i < ngreen; i++) {
-      draw_rect_y(proc,
-                  green_objects[i].x1, green_objects[i].y1,
-                  green_objects[i].x2, green_objects[i].y2, 150U);
+      uint16_t x1 = scale_coord_to_full(green_objects[i].x1, ds_used, full_lw);
+      uint16_t y1 = scale_coord_to_full(green_objects[i].y1, ds_used, full_lh);
+      uint16_t x2 = scale_coord_to_full(green_objects[i].x2, ds_used, full_lw);
+      uint16_t y2 = scale_coord_to_full(green_objects[i].y2, ds_used, full_lh);
+
+      if (x2 > full_lw) { x2 = full_lw; }
+      if (y2 > full_lh) { y2 = full_lh; }
+
+      draw_rect_y(img, x1, y1, x2, y2, 150U);
+    }
+
+    /* Also redraw the risk zones on the returned full-resolution image */
+    {
+      const uint16_t w = ccrd_w(img);
+      const uint16_t h = ccrd_h(img);
+      const uint16_t col_edges[4] = {0U, (uint16_t)(w / 3U), (uint16_t)((2U * w) / 3U), w};
+      const uint16_t row_edges[5] = {0U, (uint16_t)(h / 4U), (uint16_t)(h / 2U), (uint16_t)((3U * h) / 4U), h};
+      const uint16_t orange_y1 = row_edges[3];
+      const uint16_t orange_y2 = row_edges[4];
+      const uint16_t green_y1 = row_edges[1];
+      const uint16_t green_y2 = row_edges[3];
+      uint8_t k;
+
+      for (k = 0U; k < 3U; k++) {
+        uint16_t x1 = col_edges[k];
+        uint16_t x2 = col_edges[k + 1U];
+
+        draw_rect_y(img, x1, orange_y1, x2, orange_y2,
+                    local_result.metrics[k].orange_blocked ? 200U : 120U);
+        draw_rect_y(img, x1, green_y1, x2, green_y2,
+                    local_result.metrics[k].green_blocked ? 255U : 80U);
+        draw_rect_y(img, x1, 0U, x2, h,
+                    local_result.metrics[k].blocked ? 255U : 180U);
+      }
     }
   }
   t7 = now_us();
@@ -1158,7 +1268,7 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img,
 
     VERBOSE_PRINT("frame=%lu ds=%u proc=%ux%u orange_objects=%u green_objects=%u risk=[%u,%u,%u]\n",
                   (unsigned long)ccrd_frame_counter,
-                  (unsigned int)((proc == img) ? 1U : CCRD_DOWNSAMPLE),
+                  (unsigned int)ds_used,
                   proc->w, proc->h,
                   norange, ngreen,
                   local_result.left, local_result.middle, local_result.right);
