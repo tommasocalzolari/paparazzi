@@ -350,10 +350,10 @@ void navigation_controller_periodic(void)
           navigation_state = OBSTACLE_LEFT;
         } else if (rightConfirmed && !leftConfirmed) {
           navigation_state = OBSTACLE_RIGHT;
-        } 
-        //else {
-        //  navigation_state = OBSTACLE_MIDDLE;
-        //}
+        }
+        else {
+          navigation_state = OBSTACLE_MIDDLE;
+        }
       } else {
         moveWaypointForward(WP_GOAL, moveDistance);
       }
