@@ -239,7 +239,7 @@ int16_t objectRightAccum = 0;
 
 // Filtering parameters
 int16_t confidenceThreshold = 2; // lower to make it more reactive :  init value = 3
-int16_t confidenceMax = 4;       // lower to make it more reactive :  init value = 6
+int16_t confidenceMax = 3;       // lower to make it more reactive :  init value = 6
 
 // Orange-avoider-like confidence for forward motion
 int16_t obstacle_free_confidence = 0;
