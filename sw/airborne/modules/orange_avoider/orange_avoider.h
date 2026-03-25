@@ -21,4 +21,3 @@ extern void orange_avoider_init(void);
 extern void orange_avoider_periodic(void);
 
 #endif
-
