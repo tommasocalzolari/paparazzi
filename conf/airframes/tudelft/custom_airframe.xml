@@ -53,7 +53,7 @@
       <module name="custom_detector">
         <define name="CUSTOM_COLOR_RISK_DETECTOR_CAMERA" value="front_camera"/>
         <define name="CUSTOM_COLOR_RISK_DETECTOR_FPS" value="0"/>
-        <define name="CUSTOM_COLOR_RISK_DETECTOR_DEBUG" value="TRUE"/>
+        <define name="CUSTOM_COLOR_RISK_DETECTOR_DEBUG" value="FALSE"/>
         <define name="CUSTOM_DETECT_COLOR_OBJECT_ID" value="ABI_BROADCAST"/>
     </module>
 
