@@ -1,12 +1,10 @@
-/*
- * Copyright (C) Roland Meertens
- *
- * This file is part of paparazzi
- *
- */
 /**
- * @file "modules/custom_avoider/custom_avoider.c"
- * Custom avoider with orange_avoider-like confidence-based forward motion.
+ * This module was developed by Group 9 for the MAV 2026 course.
+ * It works together with the custom_detector module, which provides
+ * obstacle information for the left, middle, and right image regions.
+ * The implementation takes inspiration from the orange_avoider navigation
+ * module already present in Paparazzi, but was adapted to the needs of
+ * our custom vision-based avoidance strategy.
  */
 
 #include "modules/custom_avoider/custom_avoider.h"
@@ -35,9 +33,9 @@
 #define VERBOSE_PRINT(...)
 #endif
 
-/* -------------------------------------------------------------------------- */
-/* Profiling / logging                                                        */
-/* -------------------------------------------------------------------------- */
+
+/* Debugging / logging to check code efficiency                                                      */
+
 
 #ifndef CUSTOM_AVOIDER_PROFILE
 #define CUSTOM_AVOIDER_PROFILE 1
@@ -198,7 +196,10 @@ static void ca_log_periodic(uint64_t dt_us,
 #endif
 }
 
-/* -------------------------------------------------------------------------- */
+// Main navigation logic is implemented as a simple reactive state machine.
+// The drone either moves forward, reacts to a confirmed obstacle on one side,
+// searches for a free heading, or tries to recover if the projected waypoint
+// leaves the allowed flight area.
 
 static uint8_t moveWaypointForward(uint8_t waypoint, float distanceMeters);
 static uint8_t calculateForwards(struct EnuCoor_i *new_coor, float distanceMeters);
@@ -213,6 +214,7 @@ static inline int16_t clamp_i16(int16_t v, int16_t vmin, int16_t vmax)
   return v;
 }
 
+// STATE MACHINE
 enum navigation_state_t {
   SAFE,
   OBSTACLE_LEFT,
@@ -222,26 +224,30 @@ enum navigation_state_t {
   OUT_OF_BOUNDS
 };
 
-// -----------------------------------------------------------------------------
-// Global state
-// -----------------------------------------------------------------------------
+
 
 enum navigation_state_t navigation_state = SEARCH_FOR_SAFE_HEADING;
 
+// Latest obstacle flags received from the vision module.
+// They are raw per-frame detections, so they are not used directly for control.
 volatile uint8_t objectLeft = 0;
 volatile uint8_t objectMiddle = 0;
 volatile uint8_t objectRight = 0;
 
-// Signed accumulators for temporal filtering
+// Temporal filter: each sector builds confidence over time.
+// A detection increments the accumulator, absence decrements it.
+// This avoids reacting to single-frame flicker from the vision module.
 int16_t objectLeftAccum = 0;
 int16_t objectMiddleAccum = 0;
 int16_t objectRightAccum = 0;
 
-// Filtering parameters
-int16_t confidenceThreshold = 2; // lower to make it more reactive :  init value = 3
-int16_t confidenceMax = 3;       // lower to make it more reactive :  init value = 6
+// A sector is treated as truly occupied only after repeated detections.
+// Lower values make the controller more reactive, higher values more conservative.
+int16_t confidenceThreshold = 2;  // threshold to confirm an obstacle 
+int16_t confidenceMax = 3;        // saturation value for the accumulator 
 
-// Orange-avoider-like confidence for forward motion
+// Confidence that the path ahead has been free for a few cycles.
+// This is used to scale forward motion: clear path -> move more, uncertain path -> move less.
 int16_t obstacle_free_confidence = 0;
 const int16_t max_trajectory_confidence = 5;
 
@@ -279,6 +285,8 @@ void navigation_controller_init(void)
   srand(time(NULL));
   chooseRandomIncrementAvoidance();
 
+  // Subscribe to the custom vision message that provides obstacle occupancy
+  // in the left, middle, and right sectors.
   AbiBindMsgCUSTOM_DETECTION(CUSTOM_AVOIDER_CUSTOM_DETECTION_ID,
                              &color_detection_ev,
                              object_detection_cb);
@@ -299,9 +307,10 @@ void navigation_controller_periodic(void)
   // Side obstacle local turning increment
   float headingIncrement = 1.0f;
 
-  // ---------------------------------------------------------------------------
-  // Update per-sector confidence accumulators
-  // ---------------------------------------------------------------------------
+  // Temporal confirmation stage:
+  // raw detections can jitter from one frame to the next, especially near
+  // thresholds or object boundaries. Instead of reacting immediately, each
+  // sector must accumulate enough evidence before being considered blocked.
   objectLeftAccum   += (objectLeft   ? 1 : -1);
   objectMiddleAccum += (objectMiddle ? 1 : -1);
   objectRightAccum  += (objectRight  ? 1 : -1);
@@ -314,20 +323,20 @@ void navigation_controller_periodic(void)
   bool middleConfirmed = (objectMiddleAccum >= confidenceThreshold);
   bool rightConfirmed  = (objectRightAccum  >= confidenceThreshold);
 
+  // After filtering, this tells us whether the current scene is considered occupied.
   bool anyObstacleConfirmed = leftConfirmed || middleConfirmed || rightConfirmed;
 
-  // ---------------------------------------------------------------------------
-  // Orange-avoider-like free-path confidence update
-  // ---------------------------------------------------------------------------
+  // Build confidence in free space. This avoids large forward commands
+  // immediately after a turn or after a recently detected obstacle.
   if (!anyObstacleConfirmed) {
-    obstacle_free_confidence += 2;   // it was +1
+    obstacle_free_confidence += 2;   
   } else {
-    obstacle_free_confidence--;  // it was -2
+    obstacle_free_confidence--;  
   }
 
   obstacle_free_confidence = clamp_i16(obstacle_free_confidence, 0, max_trajectory_confidence);
 
-  // Forward distance now depends on confidence, like orange_avoider
+  // Forward step grows with free-space confidence, but remains bounded.
   float moveDistance = fminf(maxDistance, 0.2f * obstacle_free_confidence);
 
   VERBOSE_PRINT("raw L/M/R = %u %u %u | accum L/M/R = %d %d %d | conf L/M/R = %d %d %d | free_conf = %d | moveDistance = %.2f | state = %d\n",
@@ -336,6 +345,11 @@ void navigation_controller_periodic(void)
                 leftConfirmed, middleConfirmed, rightConfirmed,
                 obstacle_free_confidence, moveDistance, navigation_state);
 
+  // State machine:
+  // SAFE -> move forward
+  // side obstacle -> apply a small heading correction
+  // middle obstacle -> search for a new free heading
+  // out of bounds -> steer back into the allowed region
   switch (navigation_state) {
 
     case SAFE:

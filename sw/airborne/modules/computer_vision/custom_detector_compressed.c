@@ -1,13 +1,10 @@
 /*
- * Pure C Paparazzi detector derived from standalone_detector_viewer.cpp
- * but rewritten for Paparazzi:
- *   - no OpenCV
- *   - optional UYVY/YUV422 downsample
- *   - orange YUV mask + vertical-band grouping
- *   - green YUV mask + edge-supported structured detection
- *   - 3-column risk evaluation
- *   - debug drawing directly in Y channel
- *   - timing logged to file
+ * This detector module was developed by Group 9 for the MAV 2026 course.
+ * It was adapted to run inside Paparazzi and to communicate with the
+ * custom_avoider module through an ABI custom message interface named CUSTOM_DETECTION.
+ * The detector processes the incoming camera image, extracts orange and
+ * green obstacle evidence, and reduces the result to a simple left/middle/right
+ * risk representation for the navigation layer.
  */
 
 #include "modules/computer_vision/custom_detector_fast_timer.h"
@@ -54,58 +51,71 @@
 #define CCRD_DOWNSAMPLE 2
 #endif
 
-/* ----------------------------
- * Thresholds
- * ---------------------------- */
+/* Orange color segmentation thresholds.
+ * A pixel is accepted as orange only if luminance, U, V, and the V-U contrast
+ * are all within the selected ranges. The extra V-U condition helps reject
+ * colors that partially overlap with orange in YUV space.
+ */
 #ifndef CCRD_ORANGE_Y_MIN
-#define CCRD_ORANGE_Y_MIN 50 //70
+#define CCRD_ORANGE_Y_MIN 50 // lower luminance bound for orange pixels
 #endif
 #ifndef CCRD_ORANGE_Y_MAX
-#define CCRD_ORANGE_Y_MAX 190 //170
+#define CCRD_ORANGE_Y_MAX 190 // upper luminance bound for orange pixels
 #endif
 #ifndef CCRD_ORANGE_U_MIN
-#define CCRD_ORANGE_U_MIN 77 //87
+#define CCRD_ORANGE_U_MIN 77 // lower U bound for orange
 #endif
 #ifndef CCRD_ORANGE_U_MAX
-#define CCRD_ORANGE_U_MAX 131 //121
+#define CCRD_ORANGE_U_MAX 131 // upper U bound for orange
 #endif
 #ifndef CCRD_ORANGE_V_MIN
-#define CCRD_ORANGE_V_MIN 145 // 155
+#define CCRD_ORANGE_V_MIN 145 // lower V bound for orange
 #endif
 #ifndef CCRD_ORANGE_V_MAX
-#define CCRD_ORANGE_V_MAX 220 // 210
+#define CCRD_ORANGE_V_MAX 220 // upper V bound for orange
 #endif
 #ifndef CCRD_ORANGE_VU_MIN
-#define CCRD_ORANGE_VU_MIN 25 //45
+#define CCRD_ORANGE_VU_MIN 25 // minimum chromatic separation V-U for orange
 #endif
+
+/* Green color segmentation thresholds.
+ * Green is treated more conservatively than orange because many green regions
+ * in the environment are not actual obstacles. These thresholds generate only
+ * the raw green mask; structural validation is applied later.
+ */
 
 #ifndef CCRD_GREEN_Y_MIN
-#define CCRD_GREEN_Y_MIN 45
+#define CCRD_GREEN_Y_MIN 45 // lower luminance bound for green pixels
 #endif
 #ifndef CCRD_GREEN_Y_MAX
-#define CCRD_GREEN_Y_MAX 165
+#define CCRD_GREEN_Y_MAX 165 // upper luminance bound for green pixels
 #endif
 #ifndef CCRD_GREEN_U_MIN
-#define CCRD_GREEN_U_MIN 50
+#define CCRD_GREEN_U_MIN 50  // lower U bound for green
 #endif
 #ifndef CCRD_GREEN_U_MAX
-#define CCRD_GREEN_U_MAX 120
+#define CCRD_GREEN_U_MAX 120 // upper U bound for green
 #endif
 #ifndef CCRD_GREEN_V_MIN
-#define CCRD_GREEN_V_MIN 105
+#define CCRD_GREEN_V_MIN 105 // lower V bound for green
 #endif
 #ifndef CCRD_GREEN_V_MAX
-#define CCRD_GREEN_V_MAX 148
+#define CCRD_GREEN_V_MAX 148 // upper V bound for green
 #endif
 #ifndef CCRD_GREEN_VU_MIN
-#define CCRD_GREEN_VU_MIN 20
+#define CCRD_GREEN_VU_MIN 20 // minimum chromatic separation V-U for green
 #endif
 
+/* Orange is searched only in a vertical region of interest.
+ * The upper part of the image is excluded because it is less relevant for
+ * immediate avoidance and would add unnecessary detections.
+ */
+
 #ifndef CCRD_ORANGE_ROI_Y_START_NUM
-#define CCRD_ORANGE_ROI_Y_START_NUM 1
+#define CCRD_ORANGE_ROI_Y_START_NUM 1 
 #endif
 #ifndef CCRD_ORANGE_ROI_Y_START_DEN
-#define CCRD_ORANGE_ROI_Y_START_DEN 10
+#define CCRD_ORANGE_ROI_Y_START_DEN 10 // ROI starts at 1/10 of image height
 #endif
 #ifndef CCRD_ORANGE_ROI_Y_END_NUM
 #define CCRD_ORANGE_ROI_Y_END_NUM 1
@@ -114,104 +124,121 @@
 #define CCRD_ORANGE_ROI_Y_END_DEN 1
 #endif
 
-/* downsample=2 defaults */
+/* Default orange-structure parameters, tuned for processing with downsample = 2.
+ * If the downsampling factor changes significantly, these values may need to be
+ * retuned because the apparent obstacle width and height also change.
+ */
 #ifndef CCRD_ORANGE_SCAN_STEP_X
-#define CCRD_ORANGE_SCAN_STEP_X 4
+#define CCRD_ORANGE_SCAN_STEP_X 4      // horizontal step between tested bands
 #endif
 #ifndef CCRD_ORANGE_MIN_VERTICAL_RUN
-#define CCRD_ORANGE_MIN_VERTICAL_RUN 5
+#define CCRD_ORANGE_MIN_VERTICAL_RUN 5 // minimum continuous vertical evidence
 #endif
 #ifndef CCRD_ORANGE_MIN_HITS_IN_COLUMN
-#define CCRD_ORANGE_MIN_HITS_IN_COLUMN 10
+#define CCRD_ORANGE_MIN_HITS_IN_COLUMN 10 // minimum orange pixels in one band
 #endif
 #ifndef CCRD_ORANGE_BAND_WIDTH
-#define CCRD_ORANGE_BAND_WIDTH 4
+#define CCRD_ORANGE_BAND_WIDTH 4 // width of each scanned vertical band
 #endif
 #ifndef CCRD_ORANGE_MAX_GAP_BETWEEN_BANDS
-#define CCRD_ORANGE_MAX_GAP_BETWEEN_BANDS 10
+#define CCRD_ORANGE_MAX_GAP_BETWEEN_BANDS 10 // max horizontal gap when merging bands
 #endif
 #ifndef CCRD_ORANGE_MIN_GROUP_WIDTH
-#define CCRD_ORANGE_MIN_GROUP_WIDTH 3
+#define CCRD_ORANGE_MIN_GROUP_WIDTH 3 // reject very thin merged groups
 #endif
 #ifndef CCRD_ORANGE_MAX_GROUP_WIDTH
-#define CCRD_ORANGE_MAX_GROUP_WIDTH 90
+#define CCRD_ORANGE_MAX_GROUP_WIDTH 90  // reject unrealistically wide groups
 #endif
 #ifndef CCRD_ORANGE_MIN_GROUP_HEIGHT
-#define CCRD_ORANGE_MIN_GROUP_HEIGHT 18
+#define CCRD_ORANGE_MIN_GROUP_HEIGHT 18 // enforce vertical extent
 #endif
 #ifndef CCRD_ORANGE_MIN_GROUP_DENSITY_NUM
 #define CCRD_ORANGE_MIN_GROUP_DENSITY_NUM 10
 #endif
 #ifndef CCRD_ORANGE_MIN_GROUP_DENSITY_DEN
-#define CCRD_ORANGE_MIN_GROUP_DENSITY_DEN 100
+#define CCRD_ORANGE_MIN_GROUP_DENSITY_DEN 100  // minimum orange density
 #endif
 #ifndef CCRD_ORANGE_MIN_ASPECT_NUM
 #define CCRD_ORANGE_MIN_ASPECT_NUM 12
 #endif
 #ifndef CCRD_ORANGE_MIN_ASPECT_DEN
-#define CCRD_ORANGE_MIN_ASPECT_DEN 10
+#define CCRD_ORANGE_MIN_ASPECT_DEN 10  // minimum height/width ratio
 #endif
 #ifndef CCRD_ORANGE_VERTICAL_GAP_TOLERANCE
-#define CCRD_ORANGE_VERTICAL_GAP_TOLERANCE 1
+#define CCRD_ORANGE_VERTICAL_GAP_TOLERANCE 1  // allow tiny gaps in vertical profile
 #endif
 
+
+/* Green validation parameters.
+ * The raw green mask is filtered using structural support from vertical edges,
+ * then candidate regions are validated using size, aspect ratio, and density
+ * constraints in both the raw and supported masks.
+ */
+
 #ifndef CCRD_GRAD_THRESHOLD
-#define CCRD_GRAD_THRESHOLD 12
+#define CCRD_GRAD_THRESHOLD 12                        // luminance gradient threshold for edges
 #endif
 #ifndef CCRD_GREEN_EDGE_EXPAND_PX
-#define CCRD_GREEN_EDGE_EXPAND_PX 3
+#define CCRD_GREEN_EDGE_EXPAND_PX 3                   // horizontal edge support neighborhood
 #endif
 #ifndef CCRD_GREEN_MIN_SUPPORTED_PIXELS
-#define CCRD_GREEN_MIN_SUPPORTED_PIXELS 10
+#define CCRD_GREEN_MIN_SUPPORTED_PIXELS 10            // reject tiny supported components
 #endif
 #ifndef CCRD_GREEN_MIN_BOX_AREA
-#define CCRD_GREEN_MIN_BOX_AREA 100
+#define CCRD_GREEN_MIN_BOX_AREA 100                   // reject very small candidates
 #endif
 #ifndef CCRD_GREEN_MIN_HEIGHT
-#define CCRD_GREEN_MIN_HEIGHT 10
+#define CCRD_GREEN_MIN_HEIGHT 10                      // require vertical extent
 #endif
 #ifndef CCRD_GREEN_MIN_RAW_DENSITY_NUM
 #define CCRD_GREEN_MIN_RAW_DENSITY_NUM 20
 #endif
 #ifndef CCRD_GREEN_MIN_RAW_DENSITY_DEN
-#define CCRD_GREEN_MIN_RAW_DENSITY_DEN 100
+#define CCRD_GREEN_MIN_RAW_DENSITY_DEN 100            // minimum raw green density 
 #endif
 #ifndef CCRD_GREEN_BBOX_EXPAND_X
-#define CCRD_GREEN_BBOX_EXPAND_X 20
+#define CCRD_GREEN_BBOX_EXPAND_X 20                   // horizontal expansion around seed region
 #endif
 #ifndef CCRD_GREEN_BBOX_EXPAND_Y
-#define CCRD_GREEN_BBOX_EXPAND_Y 5
+#define CCRD_GREEN_BBOX_EXPAND_Y 5                    // vertical expansion around seed region
 #endif
 #ifndef CCRD_GREEN_ROW_DENSITY_NUM
 #define CCRD_GREEN_ROW_DENSITY_NUM 10
 #endif
 #ifndef CCRD_GREEN_ROW_DENSITY_DEN
-#define CCRD_GREEN_ROW_DENSITY_DEN 100
+#define CCRD_GREEN_ROW_DENSITY_DEN 100                // row occupancy threshold
 #endif
 #ifndef CCRD_GREEN_COL_DENSITY_NUM
 #define CCRD_GREEN_COL_DENSITY_NUM 8
 #endif
 #ifndef CCRD_GREEN_COL_DENSITY_DEN
-#define CCRD_GREEN_COL_DENSITY_DEN 100
+#define CCRD_GREEN_COL_DENSITY_DEN 100                // column occupancy threshold
 #endif
 #ifndef CCRD_GREEN_MIN_SUPPORTED_DENSITY_NUM
 #define CCRD_GREEN_MIN_SUPPORTED_DENSITY_NUM 15
 #endif
 #ifndef CCRD_GREEN_MIN_SUPPORTED_DENSITY_DEN
-#define CCRD_GREEN_MIN_SUPPORTED_DENSITY_DEN 1000
+#define CCRD_GREEN_MIN_SUPPORTED_DENSITY_DEN 1000     // minimum supported density
 #endif
 #ifndef CCRD_GREEN_MIN_ASPECT_NUM
 #define CCRD_GREEN_MIN_ASPECT_NUM 45
 #endif
 #ifndef CCRD_GREEN_MIN_ASPECT_DEN
-#define CCRD_GREEN_MIN_ASPECT_DEN 100
-#endif
+#define CCRD_GREEN_MIN_ASPECT_DEN 100                 // minimum height/width ratio
+#endif  
 #ifndef CCRD_GREEN_MIN_SEED_GREEN_RATIO_NUM
-#define CCRD_GREEN_MIN_SEED_GREEN_RATIO_NUM 8
+#define CCRD_GREEN_MIN_SEED_GREEN_RATIO_NUM 8  
 #endif
 #ifndef CCRD_GREEN_MIN_SEED_GREEN_RATIO_DEN
-#define CCRD_GREEN_MIN_SEED_GREEN_RATIO_DEN 100
+#define CCRD_GREEN_MIN_SEED_GREEN_RATIO_DEN 100      // minimum raw green ratio in local seed ROI
 #endif
+
+
+/* Risk-map density thresholds.
+ * The final navigation output is based on pixel density in task-relevant
+ * image regions, not directly on the candidate boxes. Orange is checked near
+ * the bottom of the image, while green is checked over a wider middle region.
+ */
 
 #ifndef CCRD_ORANGE_BOTTOM_ROWS_THRESHOLD_NUM
 #define CCRD_ORANGE_BOTTOM_ROWS_THRESHOLD_NUM 10
@@ -252,6 +279,14 @@
 #define CCRD_LOG_EVERY_N_FRAMES 20U
 #endif
 
+
+// Main detector pipeline:
+// 1) build color and edge masks
+// 2) extract orange obstacle evidence with vertical-band grouping
+// 3) extract green obstacle evidence with edge-supported validation
+// 4) convert validated masks into a 3-sector risk map
+
+static pthread_mutex_t ccrd_mutex;
 struct orange_band_t {
   uint16_t x1, x2, y1, y2;
   uint16_t hits;
@@ -286,9 +321,15 @@ struct risk_result_t {
   bool updated;
 };
 
-static pthread_mutex_t ccrd_mutex;
+
 static struct risk_result_t g_result;
 
+
+// Raw and validated masks used by the detector.
+// orange_mask / green_mask: raw color threshold results
+// edge_mask: vertical-edge support from luminance gradient
+// green_supported: green pixels that are close to a vertical edge
+// orange_valid / green_valid: final masks used for the risk evaluation
 static uint8_t orange_mask[CCRD_MAX_PIXELS];
 static uint8_t edge_mask[CCRD_MAX_PIXELS];
 static uint8_t green_mask[CCRD_MAX_PIXELS];
@@ -317,13 +358,16 @@ static void ccrd_log(const char *fmt, ...);
 #define VERBOSE_PRINT(...)
 #endif
 
+// Small timing helper used for profiling.
+// It returns the current time in microseconds and is used to measure
+// the duration of the main detector stages.
 static uint64_t now_us(void)
 {
   struct timeval tv;
   gettimeofday(&tv, NULL);
   return (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
 }
-
+// Function used to see the logging of code efficiency
 static void ccrd_open_log_file(void)
 {
   if (ccrd_log_file == NULL) {
@@ -334,6 +378,9 @@ static void ccrd_open_log_file(void)
   }
 }
 
+// Simple logging function used throughout the module.
+// It writes formatted messages to the detector log file and is mainly
+// used for timing information and debug output.
 static void ccrd_log(const char *fmt, ...)
 {
   ccrd_open_log_file();
@@ -348,16 +395,30 @@ static void ccrd_log(const char *fmt, ...)
   fflush(ccrd_log_file);
 }
 
+// Converts 2D image coordinates into a linear buffer index.
+// This is used everywhere masks are stored as 1D arrays.
 static inline uint32_t idx_of(uint16_t w, uint16_t x, uint16_t y)
 {
   return ((uint32_t)y * (uint32_t)w) + (uint32_t)x;
 }
 
+// Checks whether one ratio is greater than or equal to another without
+// using floating-point division. It is used for density tests and threshold
+// checks in the detector.
 static inline bool ratio_ge_u32(uint32_t count, uint32_t total, uint32_t num, uint32_t den)
 {
   return (count * den) >= (total * num);
 }
 
+// Logical image dimensions used by the detector.
+// These depend on the selected rotation mode, so detection can be performed
+// in a consistent front-camera frame without physically rotating the buffer.
+// FOR THE BEBOP DRONE THE ROTATION IS 90 DEG ANTICLOCKWISE
+
+
+// Returns the logical width used by the detector.
+// The detector may process the image in a rotated logical frame, so this
+// width is not always equal to the raw image width.
 static inline uint16_t ccrd_w(const struct image_t *img)
 {
 #if CCRD_ROTATE_MODE == 0
@@ -367,6 +428,9 @@ static inline uint16_t ccrd_w(const struct image_t *img)
 #endif
 }
 
+// Returns the logical height used by the detector.
+// Together with ccrd_w(), this keeps the processing consistent even when
+// the incoming image is handled through a rotation mapping.
 static inline uint16_t ccrd_h(const struct image_t *img)
 {
 #if CCRD_ROTATE_MODE == 0
@@ -376,6 +440,8 @@ static inline uint16_t ccrd_h(const struct image_t *img)
 #endif
 }
 
+// Map logical detector coordinates back to the original image coordinates.
+// This is mainly used by the debug drawing functions.
 static inline void ccrd_map_coords(const struct image_t *img,
                                    uint16_t lx, uint16_t ly,
                                    uint16_t *sx, uint16_t *sy)
@@ -392,6 +458,9 @@ static inline void ccrd_map_coords(const struct image_t *img,
 #endif
 }
 
+
+// Read one pixel from a YUV422 image.
+// Returns nothing; the Y, U, and V values are written through the output pointers.
 static inline void yuv422_get_pixel(const struct image_t *img, uint16_t x, uint16_t y,
                                     uint8_t *yp, uint8_t *up, uint8_t *vp)
 {
@@ -409,6 +478,9 @@ static inline void yuv422_get_pixel(const struct image_t *img, uint16_t x, uint1
   }
 }
 
+// Writes only the luminance value of one pixel.
+// This is used for lightweight debug overlays such as boxes and grid lines,
+/// without changing the chromatic channels.
 static inline void yuv422_set_y(struct image_t *img, uint16_t x, uint16_t y, uint8_t value)
 {
   uint8_t *buffer = (uint8_t *)img->buf;
@@ -416,6 +488,7 @@ static inline void yuv422_set_y(struct image_t *img, uint16_t x, uint16_t y, uin
   buffer[base + 2U * x + 1U] = value;
 }
 
+// Debug helper: write Y in logical detector coordinates, accounting for rotation.
 static inline void yuv422_set_y_rot(struct image_t *img, uint16_t x, uint16_t y, uint8_t value)
 {
   uint16_t sx, sy;
@@ -423,6 +496,9 @@ static inline void yuv422_set_y_rot(struct image_t *img, uint16_t x, uint16_t y,
   yuv422_set_y(img, sx, sy, value);
 }
 
+// Writes a full YUV pixel into the image buffer.
+// This is only used in the debug visualization path, in particular when the
+// processed downsampled image is expanded back to full resolution.
 static inline void yuv422_set_pixel(struct image_t *img, uint16_t x, uint16_t y,
                                     uint8_t yy, uint8_t uu, uint8_t vv)
 {
@@ -441,7 +517,8 @@ static inline void yuv422_set_pixel(struct image_t *img, uint16_t x, uint16_t y,
     buffer[base + 2U * x + 0U] = vv;
   }
 }
-
+// For debugging only: enlarge the processed downsampled image back to the
+// original size so the simulator shows what the detector actually used.
 static void copy_downsampled_to_fullres_debug(struct image_t *dst,
                                               const struct image_t *src,
                                               uint8_t ds)
@@ -472,6 +549,8 @@ static void copy_downsampled_to_fullres_debug(struct image_t *dst,
   }
 }
 
+// Scales one coordinate from downsampled detector space back to full-resolution
+// space. It is used when drawing accepted detections on the returned image.
 static inline uint16_t scale_coord_to_full(uint16_t v, uint8_t ds, uint16_t limit)
 {
   uint32_t s = (uint32_t)v * (uint32_t)ds;
@@ -481,6 +560,8 @@ static inline uint16_t scale_coord_to_full(uint16_t v, uint8_t ds, uint16_t limi
   return (uint16_t)s;
 }
 
+// Draw a rectangle by changing only the luminance channel.
+// This keeps the operation simple and avoids altering the YUV layout too much.
 static void draw_rect_y(struct image_t *img, uint16_t x1, uint16_t y1,
                         uint16_t x2, uint16_t y2, uint8_t yval)
 {
@@ -502,6 +583,9 @@ static void draw_rect_y(struct image_t *img, uint16_t x1, uint16_t y1,
   }
 }
 
+// Draws the navigation grid used by the risk-map logic.
+// This is only used in debug mode to visualize the three image sectors and
+// their vertical subdivisions directly on the output image.
 static void draw_grid_debug(struct image_t *img)
 {
   uint16_t w, h, x1, x2, y1, y2, y3, x, y;
@@ -528,6 +612,14 @@ static void draw_grid_debug(struct image_t *img)
   }
 }
 
+// Build the raw detector inputs from the incoming YUV image:
+// - orange color mask
+// - green color mask
+// - edge mask from horizontal luminance gradient
+// The masks are stored in logical detector coordinates.
+
+// Color segmentation is done directly in YUV space to avoid
+// conversion overhead and keep the detector lightweight onboard.
 static void build_masks(const struct image_t *img)
 {
   const uint16_t lw = ccrd_w(img);
@@ -594,6 +686,9 @@ static void build_masks(const struct image_t *img)
     }
   }
 
+  // Compute a simple horizontal gradient on luminance.
+  // Strong responses indicate vertical image edges, used as structural support
+  // for the green detector.
   if (lw >= 3U) {
     uint16_t y, x;
     for (y = 0U; y < lh; y++) {
@@ -612,6 +707,9 @@ static void build_masks(const struct image_t *img)
   }
 }
 
+// Orange obstacles are searched as vertically coherent structures in the lower
+// part of the image. The detector scans narrow vertical bands and keeps only
+// those with enough orange evidence and a sufficiently long vertical run.
 static uint16_t scan_orange_vertical_bands(const struct image_t *img, struct orange_band_t *bands)
 {
   const uint16_t w = ccrd_w(img);
@@ -722,6 +820,8 @@ static uint16_t scan_orange_vertical_bands(const struct image_t *img, struct ora
   return nbands;
 }
 
+// Merge neighboring valid orange bands into larger candidates and reject
+// groups that are too small, too wide, not vertical enough, or too sparse.
 static uint16_t group_orange_bands(const struct image_t *img,
                                    const struct orange_band_t *bands,
                                    uint16_t nbands,
@@ -790,7 +890,8 @@ static uint16_t group_orange_bands(const struct image_t *img,
           ok = false;
         }
       }
-
+      // Keep only the raw orange pixels that belong to accepted candidates.
+      // The risk map is computed from this validated mask, not from the raw one.
       if (ok && nobj < CCRD_MAX_ORANGE_OBJECTS) {
         uint16_t x, y;
         objects[nobj].x1 = x1;
@@ -813,6 +914,7 @@ static uint16_t group_orange_bands(const struct image_t *img,
   return nobj;
 }
 
+// Simple 4-connected component extraction used for the supported green mask.
 static uint16_t connected_components(const struct image_t *img, const uint8_t *mask, struct component_t *comps)
 {
   const uint16_t w = ccrd_w(img);
@@ -890,6 +992,8 @@ static uint16_t connected_components(const struct image_t *img, const uint8_t *m
   return ncomp;
 }
 
+// A green pixel is kept only if it is close to a strong vertical edge.
+// This reduces false positives from flat green areas such as floor or texture.
 static void build_green_supported(const struct image_t *img)
 {
   const uint16_t w = ccrd_w(img);
@@ -922,6 +1026,10 @@ static void build_green_supported(const struct image_t *img)
   }
 }
 
+// Detect green obstacle candidates starting from the supported green mask,
+// then validate them using the local raw green distribution and simple
+// geometric constraints.
+// Returns the number of accepted green objects written into 'objects'.
 static uint16_t detect_green_objects(const struct image_t *img, struct bbox_t *objects)
 {
   const uint16_t w = ccrd_w(img);
@@ -1055,6 +1163,9 @@ static uint16_t detect_green_objects(const struct image_t *img, struct bbox_t *o
   return nobj;
 }
 
+// Convert the validated masks into a compact navigation message.
+// The image is split into three vertical sectors, and obstacle presence is
+// decided from pixel density in task-relevant vertical regions.
 static void compute_risk_map(const struct image_t *img, struct risk_result_t *result)
 {
   const uint16_t w = ccrd_w(img);
@@ -1091,6 +1202,9 @@ static void compute_risk_map(const struct image_t *img, struct risk_result_t *re
       }
     }
 
+    // Orange and green use different vertical zones because they affect
+    // navigation differently in the image: orange mainly near the bottom,
+    // green over a taller middle region.
     result->metrics[i].orange_count = orange_count;
     result->metrics[i].green_count = green_count;
     result->metrics[i].orange_total = orange_total;
@@ -1120,6 +1234,9 @@ static void compute_risk_map(const struct image_t *img, struct risk_result_t *re
   result->right  = result->metrics[2].blocked ? 1U : 0U;
 }
 
+// Main image-processing callback.
+// It runs the full detector pipeline and stores the latest 3-sector result
+// to be sent later by the periodic function through ABI custom message
 static struct image_t *custom_color_risk_detector_func(struct image_t *img,
                                                        uint8_t camera_id __attribute__((unused)))
 {
@@ -1187,15 +1304,15 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img,
     uint16_t full_lw = ccrd_w(img);
     uint16_t full_lh = ccrd_h(img);
 
-    /* Show in simulation the enlarged downsampled image actually used by detector */
+    // In debug mode, first show the actual processed image back at full size.
     if (proc != img) {
       copy_downsampled_to_fullres_debug(img, proc, ds_used);
     }
 
-    /* Draw full-resolution grid on the image that is actually returned */
+    // Overlay the navigation grid on the returned full-resolution image.
     draw_grid_debug(img);
 
-    /* Draw orange boxes scaled back to full-resolution logical coordinates */
+    // Draw accepted orange candidates in full-resolution logical coordinates.
     for (i = 0U; i < norange; i++) {
       uint16_t x1 = scale_coord_to_full(orange_objects[i].x1, ds_used, full_lw);
       uint16_t y1 = scale_coord_to_full(orange_objects[i].y1, ds_used, full_lh);
@@ -1208,7 +1325,7 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img,
       draw_rect_y(img, x1, y1, x2, y2, 220U);
     }
 
-    /* Draw green boxes scaled back to full-resolution logical coordinates */
+    // Draw accepted green candidates in full-resolution logical coordinates.
     for (i = 0U; i < ngreen; i++) {
       uint16_t x1 = scale_coord_to_full(green_objects[i].x1, ds_used, full_lw);
       uint16_t y1 = scale_coord_to_full(green_objects[i].y1, ds_used, full_lh);
@@ -1221,7 +1338,7 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img,
       draw_rect_y(img, x1, y1, x2, y2, 150U);
     }
 
-    /* Also redraw the risk zones on the returned full-resolution image */
+    // Finally, overlay the sector-based risk zones used by navigation.
     {
       const uint16_t w = ccrd_w(img);
       const uint16_t h = ccrd_h(img);
@@ -1287,7 +1404,8 @@ static struct image_t *custom_color_risk_detector_func(struct image_t *img,
 
   return img;
 }
-
+// Initialize the detector state and register the image-processing callback
+// on the selected camera stream. 
 void custom_color_risk_detector_init(void)
 {
   memset(&g_result, 0, sizeof(g_result));
@@ -1302,6 +1420,8 @@ void custom_color_risk_detector_init(void)
                    0);
 }
 
+// Periodically publish the latest left/middle/right obstacle state.
+// The image callback computes it, this function only forwards it through ABI.
 void custom_color_risk_detector_periodic(void)
 {
   struct risk_result_t local_result;
