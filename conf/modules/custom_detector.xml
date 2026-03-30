@@ -91,7 +91,7 @@
 
   <header>
    <!--<file name="custom_detector_fast_rotated.h"/> --> 
-    <file name="custom_detector_fast_timer.h"/> 
+    <file name="custom_detector_compressed.h"/> 
   </header>
 
   <init fun="custom_color_risk_detector_init()"/>

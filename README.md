@@ -1,3 +1,44 @@
+# MAV 2026 Group 9 – Custom Obstacle Detection and Avoidance on Paparazzi
+
+This repository contains the implementation developed by **Group 9** for the **MAV 2026 course**.  
+The project is built on top of the **Paparazzi UAS** framework and extends it with a custom onboard perception and navigation pipeline for reactive obstacle avoidance.
+
+## Contributors
+
+**Group:** 9  
+**Submission date:** 31/03/2026
+
+| Name              | NetID       | Student Number |
+|-------------------|-------------|----------------|
+| M. Sanz Piña      | msanzpina   | 6557368        |
+| Tommaso Calzolari | tcalzolari  | 6430600        |
+| Leonardo Pedretti | lpedretti   | 6432891        |
+| D. Townsend       | dtownsed    | 6315577        |
+| E. Bester         | ebester     | 6534899        |
+| H. Kovács         | hkovacs     | 6549608        |
+
+---
+
+## Project overview
+
+The project implements a custom vision-based obstacle avoidance system for a rotorcraft in Paparazzi. The full pipeline is split into two main modules:
+
+- `custom_detector`: processes the camera stream onboard and extracts obstacle evidence from orange and green regions in the environment
+- `custom_avoider`: receives the detector output and converts it into reactive navigation commands through a state-machine-based avoidance strategy
+
+The detector reduces the camera image to a compact **left / middle / right** obstacle representation, which is then used by the avoider to decide whether to move forward, slightly adjust heading, or search for a safer direction. The implementation was inspired by the logic of Paparazzi’s `orange_avoider` module, but was adapted to work with the custom perception pipeline developed for this project.
+
+The implementation follows the standard Paparazzi project structure:
+
+- the `custom_detector` module belongs to the computer vision layer and its source files are placed in `/sw/airborne/modules/computer_vision/`
+- the `custom_avoider` module belongs to the navigation layer and its source files are placed in `/sw/airborne/modules/custom_avoider/`
+- the corresponding module definition files, `custom_detector.xml` and `custom_avoider.xml`, are located in `/conf/modules/`
+- the airframe configuration used to run the project is `custom_airframe.xml`, which, following the Paparazzi crash course conventions, is located in `/conf/airframes/tudelft/`
+
+
+
+First install Paparazzi following the standard Paparazzi Readme:
+
 # MAIN README
 
 Paparazzi UAS
@@ -57,18 +98,25 @@ _sw_: software (onboard, ground station, simulation, ...)
 _var_: products of compilation, cache for the map tiles, ...
 
 
-Compilation and demo simulation
+Compilation and launching custom implementation:
 -------------------------------
 
 1. type "make" in the top directory to compile all the libraries and tools.
 
 2. "./paparazzi" to run the Paparazzi Center
 
-3. Select the "Bixler" aircraft in the upper-left A/C combo box.
-  Select "sim" from upper-middle "target" combo box. Click "Build".
-  When the compilation is finished, select "Simulation" in Operation tab and click "Start Session".
+3. Select in the dropdown bar at the top  "bebop_custom_avoid" 
 
-4. In the GCS, wait about 10s for the aircraft to be in the "Holding point" navigation block.
+4. Select in the airframe the `custom_airframe.xml` module inside `/conf/airframes/tudelft/`
+
+5. Click "Clean" and "Build". Use nps if you want to run in simulation or ap if you want to deploy it on the real drone
+
+6. In the Build file you can check the object file of our two custom modules named `custom_detector_compressed.o` and `custom_avoider.o`
+
+
+7. When the compilation is finished, select "Simulation" in Operation tab and click "Start Session".
+
+8. In the GCS, wait about 10s for the aircraft to be in the "Holding point" navigation block.
   Switch to the "Takeoff" block (lower-left blue airway button in the strip).
   Takeoff with the green launch button.
 

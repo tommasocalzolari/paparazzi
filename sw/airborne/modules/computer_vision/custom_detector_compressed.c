@@ -7,7 +7,7 @@
  * risk representation for the navigation layer.
  */
 
-#include "modules/computer_vision/custom_detector_fast_timer.h"
+#include "modules/computer_vision/custom_detector_compressed.h"
 #include "modules/core/abi.h"
 #include "std.h"
 
