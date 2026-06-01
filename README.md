@@ -1,21 +1,29 @@
-# MAV 2026 Group 9 – Custom Obstacle Detection and Avoidance on Paparazzi
+# Onboard Obstacle Avoidance and CNN Gate Detection for Parrot Bebop
 
-This repository contains the implementation developed by **Group 9** for the **MAV 2026 course**.  
-The project is built on top of the **Paparazzi UAS** framework and extends it with a custom onboard perception and navigation pipeline for reactive obstacle avoidance.
+This repository contains the implementation developed by **Group 9** for the **TU Delft Autonomous Flight of MAV course (AE4317 / MAVLab 2026)**.
 
-## Contributors
+The project extends **Paparazzi UAS** for autonomous indoor flight with a physical **Parrot Bebop drone**. The goal was to run perception and navigation onboard under strong hardware constraints, using lightweight computer vision methods suitable for real-time flight.
 
-**Group:** 9  
-**Submission date:** 31/03/2026
+The main project contribution is available on the `compressed_detector` branch, which contains the fast and efficient onboard obstacle avoidance solution used by the team. My separate `cnn_gate_detector` branch contains my work on CNN-based gate detection and initial gate-following behavior.
 
-| Name              | NetID       | Student Number |
-|-------------------|-------------|----------------|
-| M. Sanz Piña      | msanzpina   | 6557368        |
-| Tommaso Calzolari | tcalzolari  | 6430600        |
-| Leonardo Pedretti | lpedretti   | 6432891        |
-| D. Townsend       | dtownsed    | 6315577        |
-| E. Bester         | ebester     | 6534899        |
-| H. Kovács         | hkovacs     | 6549608        |
+**Pull request:** [tudelft/paparazzi#119](https://github.com/tudelft/paparazzi/pull/119)
+
+---
+
+## Demo
+
+<img src="media/drone_photo.jpg" alt="Parrot Bebop drone" width="500">
+
+<img src="media/demo.gif" alt="Drone gate detection demo" width="600">
+
+---
+## Results
+
+The full team system achieved:
+
+- Competition ranking: 4th out of 14 teams
+- Distance traveled: 69 m
+- Successful gate traversals: 4 (Best team)
 
 ---
 
@@ -35,9 +43,52 @@ The implementation follows the standard Paparazzi project structure:
 - the corresponding module definition files, `custom_detector.xml` and `custom_avoider.xml`, are located in `/conf/modules/`
 - the airframe configuration used to run the project is `custom_airframe.xml`, which, following the Paparazzi crash course conventions, is located in `/conf/airframes/tudelft/`
 
+---
 
+## My Contribution (Tommaso Calzolari): CNN Gate Detection
 
-First install Paparazzi following the standard Paparazzi Readme:
+The main team branch for this project is `compressed_detector`, which contains the fast and efficient onboard obstacle-avoidance solution. My separate branch, `cnn_gate_detector`, contains my work on CNN-based gate detection and initial gate-following behavior.
+
+I developed a compact gate detector for the Parrot Bebop that runs onboard without external machine-learning libraries. The CNN was implemented manually in C, has approximately **16k trainable parameters**, and predicts gate presence together with the gate bounding box:
+
+- `presence_score`: whether the gate is visible
+- `cx`, `cy`: normalized gate-center coordinates
+- `w`, `h`: normalized bounding-box dimensions
+
+For the dataset, I first manually labeled a smaller set of gate images and then used **YOLO11 Nano** to generate labels for a larger dataset of approximately **15k images**.
+
+The final CNN achieved:
+
+- **Gate presence accuracy:** 96.09%
+- **Onboard inference time:** ~5 ms per image
+- **Approximate throughput:** ~200 Hz
+
+During real-world testing, the detector was able to recognize the gate, guide the drone toward it, and support a pass-through maneuver.
+---
+
+## Contributors
+
+**Group:** 9  
+**Submission date:** 31/03/2026
+
+| Name              | NetID       | Student Number |
+|-------------------|-------------|----------------|
+| M. Sanz Piña      | msanzpina   | 6557368        |
+| Tommaso Calzolari | tcalzolari  | 6430600        |
+| Leonardo Pedretti | lpedretti   | 6432891        |
+| D. Townsend       | dtownsed    | 6315577        |
+| E. Bester         | ebester     | 6534899        |
+| H. Kovács         | hkovacs     | 6549608        |
+
+---
+## Full Report
+
+A detailed technical explanation of the complete project is available here:
+
+[Project report](docs/project_report.pdf)
+---
+
+To run our solution, first install Paparazzi following the standard Paparazzi Readme:
 
 # MAIN README
 
