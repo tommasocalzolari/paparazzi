@@ -12,9 +12,9 @@ The main project contribution is available on the `compressed_detector` branch, 
 
 ## Demo
 
-<img src="media/drone_photo.jpg" alt="Parrot Bebop drone" width="500">
+<img src="drone_photo.jpg" alt="Parrot Bebop drone" width="400">
 
-<img src="media/demo.gif" alt="Drone gate detection demo" width="600">
+<img src="demo.gif" alt="Drone gate detection demo" width="600">
 
 ---
 ## Results
@@ -64,6 +64,7 @@ The final CNN achieved:
 - **Approximate throughput:** ~200 Hz
 
 During real-world testing, the detector was able to recognize the gate, guide the drone toward it, and support a pass-through maneuver.
+
 ---
 
 ## Contributors
@@ -85,7 +86,7 @@ During real-world testing, the detector was able to recognize the gate, guide th
 
 A detailed technical explanation of the complete project is available here:
 
-[Project report](docs/project_report.pdf)
+[Project report](project_report.pdf)
 ---
 
 To run our solution, first install Paparazzi following the standard Paparazzi Readme:
