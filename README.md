@@ -4,7 +4,7 @@ This repository contains the implementation developed by **Group 9** for the **T
 
 The project extends **Paparazzi UAS** for autonomous indoor flight with a physical **Parrot Bebop drone**. The goal was to run perception and navigation onboard under strong hardware constraints, using lightweight computer vision methods suitable for real-time flight.
 
-The main project contribution is available on the `compressed_detector` branch, which contains the fast and efficient onboard obstacle avoidance solution used by the team. My separate `cnn_gate_detector` branch contains my work on CNN-based gate detection and initial gate-following behavior.
+The main project contribution is available on the `compressed_detector` branch, which contains the fast and efficient onboard obstacle-avoidance solution developed by the team. My separate `cnn_gate_detector` branch contains my work on CNN-based gate detection and initial gate-following behavior.
 
 **Pull request:** [tudelft/paparazzi#119](https://github.com/tudelft/paparazzi/pull/119)
 
@@ -12,9 +12,20 @@ The main project contribution is available on the `compressed_detector` branch, 
 
 ## Demo
 
-<img src="drone_photo.jpg" alt="Parrot Bebop drone" width="400">
-
-<img src="demo.gif" alt="Drone gate detection demo" width="600">
+<table>
+  <tr>
+    <td align="center" width="35%">
+      <img src="drone_photo.jpg" alt="Parrot Bebop drone" width="260">
+      <br>
+      <em>Parrot Bebop drone</em>
+    </td>
+    <td align="center" width="65%">
+      <img src="demo.gif" alt="Drone gate detection demo" width="420">
+      <br>
+      <em>Onboard perception and navigation demo</em>
+    </td>
+  </tr>
+</table>
 
 ---
 ## Results
@@ -24,6 +35,13 @@ The full team system achieved:
 - Competition ranking: 4th out of 14 teams
 - Distance traveled: 69 m
 - Successful gate traversals: 4 (Best team)
+
+---
+## Full Report
+
+A detailed technical explanation of the complete project is available here:
+
+[Project report](project_report.pdf)
 
 ---
 
@@ -81,12 +99,6 @@ During real-world testing, the detector was able to recognize the gate, guide th
 | E. Bester         | ebester     | 6534899        |
 | H. Kovács         | hkovacs     | 6549608        |
 
----
-## Full Report
-
-A detailed technical explanation of the complete project is available here:
-
-[Project report](project_report.pdf)
 ---
 
 To run our solution, first install Paparazzi following the standard Paparazzi Readme:
