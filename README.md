@@ -4,9 +4,11 @@ This repository contains the implementation developed by **Group 9** for the **T
 
 The project extends **Paparazzi UAS** for autonomous indoor flight with a physical **Parrot Bebop drone**. The goal was to run perception and navigation onboard under strong hardware constraints, using lightweight computer vision methods suitable for real-time flight.
 
-The main project contribution is available on the `compressed_detector` branch, which contains the fast and efficient onboard obstacle-avoidance solution developed by the team. My separate `cnn_gate_detector` branch contains my work on CNN-based gate detection and initial gate-following behavior.
+The main team implementation is available on the `compressed_detector` branch. My separate `cnn_gate_detector` branch contains the CNN-based gate detection work and initial gate-following behavior.
 
 **Pull request:** [tudelft/paparazzi#119](https://github.com/tudelft/paparazzi/pull/119)
+
+**Full report:** [Project report](media/project_report.pdf)
 
 ---
 
@@ -15,19 +17,22 @@ The main project contribution is available on the `compressed_detector` branch, 
 <table>
   <tr>
     <td align="center" width="35%">
-      <img src="drone_photo.jpg" alt="Parrot Bebop drone" width="260">
+      <img src="media/drone_photo.jpg" alt="Parrot Bebop drone" width="280">
       <br>
       <em>Parrot Bebop drone</em>
     </td>
     <td align="center" width="65%">
-      <img src="demo.gif" alt="Drone gate detection demo" width="420">
+      <img src="media/demo.gif" alt="Drone gate detection demo" width="420">
       <br>
       <em>Onboard perception and navigation demo</em>
     </td>
   </tr>
 </table>
 
+[MP4 demo video](media/demo.mp4)
+
 ---
+
 ## Results
 
 The full team system achieved:
@@ -37,43 +42,161 @@ The full team system achieved:
 - Successful gate traversals: 4 (Best team)
 
 ---
-## Full Report
 
-A detailed technical explanation of the complete project is available here:
+## System Overview
 
-[Project report](project_report.pdf)
+The project adds a custom onboard obstacle-avoidance stack to Paparazzi:
+
+- `custom_detector`: processes the camera stream and extracts orange-pillar and green-plant obstacle evidence.
+- `custom_avoider`: converts the detector output into left / middle / right risk sectors for reactive navigation.
+
+The vision pipeline runs on downsampled YUV camera frames and uses color segmentation plus lightweight structural filters. The final output is a compact risk map that the navigation state machine uses to select safe motion directions.
+
+### Orange Obstacle Detection
+
+Orange pillars are detected with YUV thresholding, then filtered by vertical support and geometric consistency.
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <img src="media/orange_original.png" alt="Original camera frame with orange obstacles" width="280">
+      <br>
+      <sub>Original frame</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="media/orange_raw.png" alt="Raw orange color mask" width="280">
+      <br>
+      <sub>Raw orange mask</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="media/orange_valid.png" alt="Validated orange obstacle mask" width="280">
+      <br>
+      <sub>Validated obstacle mask</sub>
+    </td>
+  </tr>
+</table>
+
+### Green Plant Detection
+
+Green plants are harder to separate from the background, so the raw green mask is supported by vertical edges before final validation. Two representative plant examples are shown below.
+
+<table>
+  <tr>
+    <td align="center" width="20%">
+      <img src="media/orange_original.png" alt="First plant example original frame" width="170">
+      <br>
+      <sub>Original</sub>
+    </td>
+    <td align="center" width="20%">
+      <img src="media/green_raw1.png" alt="First plant raw green mask" width="170">
+      <br>
+      <sub>Raw green</sub>
+    </td>
+    <td align="center" width="20%">
+      <img src="media/edge_mask1.png" alt="First plant vertical edge mask" width="170">
+      <br>
+      <sub>Vertical edges</sub>
+    </td>
+    <td align="center" width="20%">
+      <img src="media/green_supported1.png" alt="First plant edge-supported green mask" width="170">
+      <br>
+      <sub>Edge-supported</sub>
+    </td>
+    <td align="center" width="20%">
+      <img src="media/green_valid1.png" alt="First plant validated mask" width="170">
+      <br>
+      <sub>Validated</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="20%">
+      <img src="media/green_original2.png" alt="Second plant example original frame" width="170">
+      <br>
+      <sub>Original</sub>
+    </td>
+    <td align="center" width="20%">
+      <img src="media/green_raw2.png" alt="Second plant raw green mask" width="170">
+      <br>
+      <sub>Raw green</sub>
+    </td>
+    <td align="center" width="20%">
+      <img src="media/edge_mask2.png" alt="Second plant vertical edge mask" width="170">
+      <br>
+      <sub>Vertical edges</sub>
+    </td>
+    <td align="center" width="20%">
+      <img src="media/green_supported2.png" alt="Second plant edge-supported green mask" width="170">
+      <br>
+      <sub>Edge-supported</sub>
+    </td>
+    <td align="center" width="20%">
+      <img src="media/green_valid2.png" alt="Second plant validated mask" width="170">
+      <br>
+      <sub>Validated</sub>
+    </td>
+  </tr>
+</table>
+
+### Combined Avoidance Output
+
+The validated orange and green masks are merged into one obstacle representation and converted into a navigation risk map.
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <img src="media/normal.png" alt="Original scene for final obstacle pipeline" width="280">
+      <br>
+      <sub>Original scene</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="media/combined.png" alt="Combined orange and green obstacle mask" width="280">
+      <br>
+      <sub>Combined obstacle mask</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="media/risks.png" alt="Final obstacle risk map used by the navigation module" width="280">
+      <br>
+      <sub>Risk map for navigation</sub>
+    </td>
+  </tr>
+</table>
 
 ---
 
-## Project overview
+## My Contribution: CNN Gate Detection
 
-The project implements a custom vision-based obstacle avoidance system for a rotorcraft in Paparazzi. The full pipeline is split into two main modules:
+I developed a compact gate detector for the Parrot Bebop that runs onboard without external machine-learning libraries. The network was implemented manually in C, has approximately **16k trainable parameters**, and predicts gate presence plus a bounding box:
 
-- `custom_detector`: processes the camera stream onboard and extracts obstacle evidence from orange and green regions in the environment
-- `custom_avoider`: receives the detector output and converts it into reactive navigation commands through a state-machine-based avoidance strategy
+- `presence_score`: whether the gate is visible.
+- `cx`, `cy`: normalized gate-center coordinates.
+- `w`, `h`: normalized bounding-box dimensions.
 
-The detector reduces the camera image to a compact **left / middle / right** obstacle representation, which is then used by the avoider to decide whether to move forward, slightly adjust heading, or search for a safer direction. The implementation was inspired by the logic of Paparazzi’s `orange_avoider` module, but was adapted to work with the custom perception pipeline developed for this project.
+The dataset started with manual labels, then **YOLO11 Nano** was trained on those labels and used to automatically label roughly **15k images**. The final CNN detections compare predicted boxes and centers against ground truth on unseen test images.
 
-The implementation follows the standard Paparazzi project structure:
-
-- the `custom_detector` module belongs to the computer vision layer and its source files are placed in `/sw/airborne/modules/computer_vision/`
-- the `custom_avoider` module belongs to the navigation layer and its source files are placed in `/sw/airborne/modules/custom_avoider/`
-- the corresponding module definition files, `custom_detector.xml` and `custom_avoider.xml`, are located in `/conf/modules/`
-- the airframe configuration used to run the project is `custom_airframe.xml`, which, following the Paparazzi crash course conventions, is located in `/conf/airframes/tudelft/`
-
----
-
-## My Contribution (Tommaso Calzolari): CNN Gate Detection
-
-The main team branch for this project is `compressed_detector`, which contains the fast and efficient onboard obstacle-avoidance solution. My separate branch, `cnn_gate_detector`, contains my work on CNN-based gate detection and initial gate-following behavior.
-
-I developed a compact gate detector for the Parrot Bebop that runs onboard without external machine-learning libraries. The CNN was implemented manually in C, has approximately **16k trainable parameters**, and predicts gate presence together with the gate bounding box:
-
-- `presence_score`: whether the gate is visible
-- `cx`, `cy`: normalized gate-center coordinates
-- `w`, `h`: normalized bounding-box dimensions
-
-For the dataset, I first manually labeled a smaller set of gate images and then used **YOLO11 Nano** to generate labels for a larger dataset of approximately **15k images**.
+<table>
+  <tr>
+    <td align="center" width="25%">
+      <img src="media/label.png" alt="Manual gate labeling interface" width="230">
+      <br>
+      <sub>Manual gate label</sub>
+    </td>
+    <td align="center" width="25%">
+      <img src="media/YOLO.jpg" alt="YOLO-generated gate label" width="230">
+      <br>
+      <sub>YOLO auto-label</sub>
+    </td>
+    <td align="center" width="25%">
+      <img src="media/cnn1.jpg" alt="CNN gate detection result with high confidence" width="230">
+      <br>
+      <sub>CNN result: 0.99 confidence</sub>
+    </td>
+    <td align="center" width="25%">
+      <img src="media/cnn2.jpg" alt="CNN gate detection result from a skewed angle" width="230">
+      <br>
+      <sub>CNN result: skewed angle</sub>
+    </td>
+  </tr>
+</table>
 
 The final CNN achieved:
 
@@ -81,7 +204,7 @@ The final CNN achieved:
 - **Onboard inference time:** ~5 ms per image
 - **Approximate throughput:** ~200 Hz
 
-During real-world testing, the detector was able to recognize the gate, guide the drone toward it, and support a pass-through maneuver.
+During real-world testing, the detector recognized the gate, guided the drone toward it, and supported a pass-through maneuver.
 
 ---
 
