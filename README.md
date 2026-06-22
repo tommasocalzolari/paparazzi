@@ -12,7 +12,7 @@ The main team implementation is available on the `compressed_detector` branch. M
 
 ---
 
-## Demo
+## Demo 
 
 <table>
   <tr>
